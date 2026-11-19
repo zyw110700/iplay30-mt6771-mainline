@@ -649,7 +649,13 @@ int mtk_ddp_comp_init(struct device *dev, struct device_node *node, struct mtk_d
 	type = mtk_ddp_matches[comp_id].type;
 
 	comp->id = comp_id;
-	comp->funcs = mtk_ddp_matches[comp_id].funcs;
+	/*
+	 * The MT6771 bring-up "passthrough" DSI component only wraps the DSI
+	 * block that the bootloader already configured: it must not call into
+	 * the real mtk_dsi component helpers, so leave its DDP callbacks empty.
+	 */
+	if (!node || !of_device_is_compatible(node, "mediatek,mt6771-dsi-passthrough"))
+		comp->funcs = mtk_ddp_matches[comp_id].funcs;
 	/* Not all drm components have a DTS device node, such as ovl_adaptor,
 	 * which is the drm bring up sub driver
 	 */

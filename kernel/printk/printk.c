@@ -52,6 +52,9 @@
 
 #include <linux/uaccess.h>
 #include <asm/sections.h>
+#ifdef CONFIG_ARM64
+#include <asm/cacheflush.h>
+#endif
 
 #include <trace/events/initcall.h>
 #define CREATE_TRACE_POINTS
@@ -522,6 +525,37 @@ _DEFINE_PRINTKRB(printk_rb_static, CONFIG_LOG_BUF_SHIFT - PRB_AVGBITS,
 static struct printk_ringbuffer printk_rb_dynamic;
 
 struct printk_ringbuffer *prb = &printk_rb_static;
+
+#ifdef CONFIG_ARM64
+/*
+ * TEMP DEBUG (MT6771 bring-up): flush the complete printk ring buffer to DRAM
+ * so that the oops/panic text survives a watchdog reset. The console is not
+ * usable on this board; without this, dirty ring lines are lost on reset.
+ */
+void printk_debug_flush_to_dram(void)
+{
+	struct printk_ringbuffer *rb = prb;
+	unsigned long start, size;
+
+	if (!rb)
+		return;
+
+	start = (unsigned long)rb;
+	dcache_clean_poc(start, start + sizeof(*rb));
+
+	start = (unsigned long)rb->desc_ring.descs;
+	size = sizeof(struct prb_desc) << rb->desc_ring.count_bits;
+	dcache_clean_poc(start, start + size);
+
+	start = (unsigned long)rb->desc_ring.infos;
+	size = sizeof(struct printk_info) << rb->desc_ring.count_bits;
+	dcache_clean_poc(start, start + size);
+
+	start = (unsigned long)rb->text_data_ring.data;
+	size = 1UL << rb->text_data_ring.size_bits;
+	dcache_clean_poc(start, start + size);
+}
+#endif
 
 /*
  * We cannot access per-CPU data (e.g. per-CPU flush irq_work) before

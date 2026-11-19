@@ -398,6 +398,20 @@ config TOUCHSCREEN_GOODIX
 	  To compile this driver as a module, choose M here: the
 	  module will be called goodix.
 
+config TOUCHSCREEN_GOODIX_GT9886
+	tristate "Goodix GT9886-family I2C touchscreen"
+	depends on I2C
+	help
+	  Say Y here if you have a Goodix touchscreen using the 16-bit
+	  register map of the GT9886/GT7386 generation (event buffer at
+	  0x824E, version at 0x8240).  This is not the older gt9xx map
+	  handled by TOUCHSCREEN_GOODIX.
+
+	  If unsure, say N.
+
+	  To compile this driver as a module, choose M here: the
+	  module will be called goodix_gt9886.
+
 config TOUCHSCREEN_GOODIX_BERLIN_CORE
 	tristate
 

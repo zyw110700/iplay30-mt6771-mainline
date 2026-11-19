@@ -904,8 +904,20 @@ static int mt6370_chg_probe(struct platform_device *pdev)
 				     "Failed to init mt6370 charger setting\n");
 
 	ret = mt6370_chg_init_irq(priv);
-	if (ret)
+	if (ret) {
+		/*
+		 * mt6370_chg_init_setting() above cleared F_USBCHGEN and this
+		 * function is the only place that turns it back on (through
+		 * the BC1.2 flow).  If IRQs are unavailable, re-enable USB
+		 * charging unconditionally instead of silently stopping the
+		 * charge.  The ICHG/input-limit registers are left as-is, so
+		 * this is a slow but safe fallback.
+		 */
+		if (mt6370_chg_field_set(priv, F_USBCHGEN, 1))
+			dev_err(priv->dev,
+				"Failed to re-enable usb_chg_en after IRQ failure\n");
 		return ret;
+	}
 
 	mt6370_chg_pwr_rdy_check(priv);
 

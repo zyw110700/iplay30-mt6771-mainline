@@ -41,6 +41,15 @@ static const struct mtk_mmsys_driver_data mt6779_mmsys_driver_data = {
 	.clk_driver = "clk-mt6779-mm",
 };
 
+/*
+ * MT6771 has the same MMSYS layout as MT6779/MT8183, but the mainline clock
+ * provider for it does not exist yet.  The display gates are left enabled by
+ * the bootloader and the DDP consumers use a fixed clock for now.
+ */
+static const struct mtk_mmsys_driver_data mt6771_mmsys_driver_data = {
+	.clk_driver = "clk-mt6771-mm",
+};
+
 static const struct mtk_mmsys_driver_data mt6795_mmsys_driver_data = {
 	.clk_driver = "clk-mt6795-mm",
 	.routes = mt8173_mmsys_routing_table,
@@ -461,6 +470,7 @@ static const struct of_device_id of_match_mtk_mmsys[] = {
 	{ .compatible = "mediatek,mt2701-mmsys", .data = &mt2701_mmsys_driver_data },
 	{ .compatible = "mediatek,mt2712-mmsys", .data = &mt2712_mmsys_driver_data },
 	{ .compatible = "mediatek,mt6779-mmsys", .data = &mt6779_mmsys_driver_data },
+	{ .compatible = "mediatek,mt6771-mmsys", .data = &mt6771_mmsys_driver_data },
 	{ .compatible = "mediatek,mt6795-mmsys", .data = &mt6795_mmsys_driver_data },
 	{ .compatible = "mediatek,mt6797-mmsys", .data = &mt6797_mmsys_driver_data },
 	{ .compatible = "mediatek,mt8167-mmsys", .data = &mt8167_mmsys_driver_data },

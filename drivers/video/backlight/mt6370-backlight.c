@@ -53,6 +53,12 @@
 #define MT6370_BL_MAX_COMMON_BRIGHTNESS	2048
 #define MT6370_BL_MAX_6372_BRIGHTNESS	16384
 #define MT6370_BL_MAX_CH		15
+/*
+ * The boost converter cannot drive the LED string below this code, the
+ * panel simply goes dark.  Keep a small floor so the brightness slider's
+ * minimum is still a visible picture (0 still means off).
+ */
+#define MT6370_BL_MIN_BRIGHTNESS	48
 
 enum {
 	MT6370_VID_COMMON = 1,
@@ -76,6 +82,9 @@ static int mt6370_bl_update_status(struct backlight_device *bl_dev)
 	unsigned int enable_val;
 	u8 brightness_val[2];
 	int ret;
+
+	if (brightness && brightness < MT6370_BL_MIN_BRIGHTNESS)
+		brightness = MT6370_BL_MIN_BRIGHTNESS;
 
 	if (brightness) {
 		brightness_val[0] = (brightness - 1) & priv->dim2_mask;

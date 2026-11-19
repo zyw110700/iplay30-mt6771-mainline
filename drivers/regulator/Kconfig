@@ -992,6 +992,14 @@ config REGULATOR_MT6370
 	  This driver supports the control for DisplayBias voltages and one
 	  general purpose LDO which is commonly used to drive the vibrator.
 
+config REGULATOR_MT6370_OTG
+	tristate "MT6370 USB OTG boost regulator"
+	depends on MFD_MT6370
+	help
+	  Say Y here to expose the MT6370 5V OTG boost converter as a
+	  regulator.  This is the minimal driver needed to power a USB
+	  device when the MTU3 controller switches the port to host mode.
+
 config REGULATOR_MT6380
 	tristate "MediaTek MT6380 PMIC"
 	depends on MTK_PMIC_WRAP

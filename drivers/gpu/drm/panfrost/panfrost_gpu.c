@@ -222,6 +222,8 @@ static const struct panfrost_model gpu_models[] = {
 	GPU_MODEL(g71, 0x6000,
 		GPU_REV_EXT(g71, 0, 0, 1, _05dev0)),
 	GPU_MODEL(g72, 0x6001),
+	/* MediaTek MT6771 (Helio P60/P70) reports a vendor specific G72 ID */
+	GPU_MODEL(g72, 0x6221),
 	GPU_MODEL(g51, 0x7000),
 	GPU_MODEL(g76, 0x7001),
 	GPU_MODEL(g52, 0x7002),

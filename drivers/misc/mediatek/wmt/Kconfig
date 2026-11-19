@@ -1,0 +1,16 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# MediaTek WMT/STP stack (vendor code from the MT6771 Android tree, built
+# out of drivers/misc/mediatek/wmt with a small mainline compatibility
+# layer).  This provides the transport the connectivity MCU needs before the
+# WiFi firmware can run: DLM power-on table, ROM patch download, MCU clock
+# and oscillator configuration, RF calibration trigger.
+
+config MTK_WMT
+	tristate "MediaTek WMT/STP connectivity stack"
+	depends on MTK_BTIF
+	help
+	  Vendor WMT (Wireless Management Task) and STP (Serial Transport
+	  Protocol) stack for the MediaTek connectivity subsystem.
+
+	  If unsure, say N.

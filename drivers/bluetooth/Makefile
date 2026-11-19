@@ -4,6 +4,8 @@
 #
 
 obj-$(CONFIG_BT_HCIVHCI)	+= hci_vhci.o
+obj-$(CONFIG_BT_HCISTPBT)	+= hci_stpbt.o
+
 obj-$(CONFIG_BT_HCIUART)	+= hci_uart.o
 obj-$(CONFIG_BT_HCIBCM203X)	+= bcm203x.o
 obj-$(CONFIG_BT_HCIBCM4377)	+= hci_bcm4377.o

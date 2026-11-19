@@ -170,6 +170,11 @@ extern void __printk_deferred_exit(void);
 extern void printk_force_console_enter(void);
 extern void printk_force_console_exit(void);
 
+#ifdef CONFIG_ARM64
+/* TEMP DEBUG (MT6771 bring-up): persist the printk ring across a reset. */
+extern void printk_debug_flush_to_dram(void);
+#endif
+
 /*
  * The printk_deferred_enter/exit macros are available only as a hack for
  * some code paths that need to defer all printk console printing. Interrupts

@@ -101,6 +101,15 @@ config BT_HCIBTSDIO
 	  Say Y here to compile support for Bluetooth SDIO devices into the
 	  kernel or say M to compile it as module (btsdio).
 
+config BT_HCISTPBT
+	tristate "MediaTek STP/BTIF HCI transport (CONNAC)"
+	depends on BT && MTK_WMT
+	help
+	  Say Y here to build an HCI transport for MediaTek CONNAC
+	  connectivity chips (e.g. MT6631) whose Bluetooth controller is
+	  reached through the WMT/STP stack over the internal BTIF block
+	  instead of a real UART.  This creates a standard hci0 device.
+
 config BT_HCIUART
 	tristate "HCI UART driver"
 	depends on SERIAL_DEV_BUS || !SERIAL_DEV_BUS

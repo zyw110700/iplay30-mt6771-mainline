@@ -83,6 +83,7 @@
 	 *  x21        primary_entry() .. start_kernel()        FDT pointer passed at boot in x0
 	 */
 SYM_CODE_START(primary_entry)
+
 	bl	record_mmu_state
 	bl	preserve_boot_args
 
@@ -217,35 +218,35 @@ SYM_CODE_END(preserve_boot_args)
  *
  *   x0 = __pa(KERNEL_START)
  */
+
 SYM_FUNC_START_LOCAL(__primary_switched)
 	adr_l	x4, init_task
 	init_cpu_task x4, x5, x6
 
-	adr_l	x8, vectors			// load VBAR_EL1 with virtual
-	msr	vbar_el1, x8			// vector table address
+	adr_l	x8, vectors
+	msr	vbar_el1, x8
 	isb
 
 	stp	x29, x30, [sp, #-16]!
 	mov	x29, sp
 
-	str_l	x21, __fdt_pointer, x5		// Save FDT pointer
+	str_l	x21, __fdt_pointer, x5
 
-	adrp	x4, _text			// Save the offset between
-	sub	x4, x4, x0			// the kernel virtual and
-	str_l	x4, kimage_voffset, x5		// physical mappings
+	adrp	x4, _text
+	sub	x4, x4, x0
+	str_l	x4, kimage_voffset, x5
 
 	mov	x0, x20
 	bl	set_cpu_boot_mode_flag
 
-#if defined(CONFIG_KASAN_GENERIC) || defined(CONFIG_KASAN_SW_TAGS)
-	bl	kasan_early_init
-#endif
 	mov	x0, x20
-	bl	finalise_el2			// Prefer VHE if possible
+	bl	finalise_el2
 	ldp	x29, x30, [sp], #16
 	bl	start_kernel
 	ASM_BUG()
 SYM_FUNC_END(__primary_switched)
+
+
 
 /*
  * end early head section, begin head code that is also used for
@@ -510,14 +511,29 @@ SYM_FUNC_START_LOCAL(__primary_switch)
 	adrp	x2, __pi_init_idmap_pg_dir
 	bl	__enable_mmu
 
+	/*
+	 * Use the physical/ID-mapped early stack here: the kernel VA mapping
+	 * does not exist until __pi_early_map_kernel() has run.  init_cpu_task
+	 * will switch to init_task's virtual stack in __primary_switched.
+	 */
 	adrp	x1, early_init_stack
 	mov	sp, x1
 	mov	x29, xzr
-	mov	x0, x20				// pass the full boot status
-	mov	x1, x21				// pass the FDT
-	bl	__pi_early_map_kernel		// Map and relocate the kernel
+	mov	x0, x20
+	mov	x1, x21
 
-	ldr	x8, =__primary_switched
-	adrp	x0, KERNEL_START		// __pa(KERNEL_START)
-	br	x8
+	/*
+	 * Run the PI mapping code first: it calls relocate_kernel(), which
+	 * patches the literal below to the linked VA of __primary_switched.
+	 * We are still identity-mapped here, so adr_l would resolve to the
+	 * physical address; the relocated literal gives us the VA.  x0 stays
+	 * pa_base for __primary_switched's kimage_voffset.
+	 */
+	bl	__pi_early_map_kernel
+	ldr	x30, .Lprimary_switched_va
+	br	x30
+
+	.align	3
+.Lprimary_switched_va:
+	.quad	__primary_switched
 SYM_FUNC_END(__primary_switch)

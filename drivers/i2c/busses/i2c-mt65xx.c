@@ -86,6 +86,45 @@
 
 #define I2C_DRV_NAME		"i2c-mt65xx"
 
+/*
+ * MT6771 bring-up knobs.
+ *
+ * The register layout of the MT6771 I2C block is not documented anywhere in
+ * this tree (the vendor DT only says ver=2 + set_ltiming=1, which suggests the
+ * v2 layout used by MT8183).  Instead of guessing and reflashing the kernel for
+ * every idea, expose the few variables that matter through sysfs so the
+ * initramfs shell can try them on a live boot:
+ *
+ *   variant   -1/other: keep the DT compatible data (v2, mt8183-like)
+ *              0  : legacy v1 register layout (pre-charge10 behaviour)
+ *              1  : v2 layout + ltiming, no DMAACK/ASYNC control bits
+ *              2  : v2 + ltiming + DMAACK/ASYNC + AP DMA handshake reset
+ *              3  : v2 + ltiming + DMAACK/ASYNC, no AP DMA handshake
+ *   force_od   1  : program open-drain IO config even if DT asks push-pull
+ *   speed_khz     : override the bus clock (0 = use DT/default)
+ *   timeout_ms    : override the adapter transfer timeout (0 = 2 s)
+ *
+ * variant/force_od/speed_khz are applied from mtk_i2c_init_hw(), which runs
+ * at probe and after every failed transfer, so a new value takes effect on
+ * the next access.  Change "variant" and rebind the platform device to
+ * re-probe.
+ */
+static int mtk_i2c_test_variant = -1;
+module_param_named(variant, mtk_i2c_test_variant, int, 0644);
+MODULE_PARM_DESC(variant, "MT6771 I2C register-set test variant (-1=DT/v2, 0=v1, 1=v2, 2=v2+apdma, 3=v2+dma_sync)");
+
+static bool mtk_i2c_force_od;
+module_param_named(force_od, mtk_i2c_force_od, bool, 0644);
+MODULE_PARM_DESC(force_od, "Force open-drain IO config instead of DT push-pull");
+
+static unsigned int mtk_i2c_speed_khz;
+module_param_named(speed_khz, mtk_i2c_speed_khz, uint, 0644);
+MODULE_PARM_DESC(speed_khz, "Override I2C bus clock in kHz (0 = DT/default)");
+
+static unsigned int mtk_i2c_timeout_ms;
+module_param_named(timeout_ms, mtk_i2c_timeout_ms, uint, 0644);
+MODULE_PARM_DESC(timeout_ms, "Override adapter transfer timeout in ms (0 = 2 s)");
+
 /**
  * enum i2c_mt65xx_clks - Clocks enumeration for MT65XX I2C
  *
@@ -307,6 +346,7 @@ struct mtk_i2c {
 	u16 ltiming_reg;
 	unsigned char auto_restart;
 	bool ignore_restart_irq;
+	bool bus_recovery_done;		/* one-shot boot-time bus recovery */
 	struct mtk_i2c_ac_timing ac_timing;
 	const struct mtk_i2c_compatible *dev_comp;
 };
@@ -376,6 +416,100 @@ static const struct mtk_i2c_compatible mt2712_compat = {
 	.max_dma_support = 33,
 };
 
+/*
+ * MT6771.
+ *
+ * The stock 4.14 kernel of the iPlay 30 (kernel image in boot_editor/boot.img)
+ * contains the newer MediaTek i2c driver that reads the "i2c_common" node:
+ * dma_support, idvfs, set_dt_div, check_max_freq, set_ltiming, set_aed,
+ * ext_time_config, clk_compatible, ...  The vendor DTS sets ver = <2> and
+ * set_ltiming, and the disassembly of that kernel chooses the following
+ * v2 offsets when ver == 2:
+ *
+ *   IO_CONFIG = 0x34, LTIMING = 0x2c, TRANSFER_LEN_AUX = 0x44,
+ *   CLOCK_DIV = 0x48, and it skips the old DCM_EN write at 0x54.
+ *
+ * That is the same register file mainline uses for MT8183, so describe the
+ * controller as MT8183: v2 layout, ltiming timings, DMAACK/ASYNC control bits.
+ */
+static const struct mtk_i2c_compatible mt6771_compat = {
+	.quirks = &mt8183_i2c_quirks,
+	.regs = mt_i2c_regs_v2,
+	.pmic_i2c = 0,
+	.dcm = 0,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 1,
+	.ltiming_adjust = 1,
+	.apdma_sync = 0,
+	.max_dma_support = 33,
+};
+
+/*
+ * Test variants behind the "variant" module parameter, so they can be
+ * compared on a live boot without reflashing:
+ *
+ *   -1/4..: keep the DT compatible data (v2, mt8183-like, the default)
+ *    0   : legacy v1 register file (what charge1..charge9 used)
+ *    1   : v2 layout + ltiming, but no DMAACK/ASYNC control bits
+ *    2   : like 3, plus the newer AP DMA handshake reset
+ *    3   : v2 layout + ltiming + DMAACK/ASYNC, no AP DMA handshake
+ */
+static const struct mtk_i2c_compatible mt6771_v1_compat = {
+	.regs = mt_i2c_regs_v1,
+	.pmic_i2c = 0,
+	.dcm = 1,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 0,
+	.ltiming_adjust = 0,
+	.apdma_sync = 0,
+	.max_dma_support = 33,
+};
+
+static const struct mtk_i2c_compatible mt6771_v2_compat = {
+	.quirks = &mt8183_i2c_quirks,
+	.regs = mt_i2c_regs_v2,
+	.pmic_i2c = 0,
+	.dcm = 1,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 0,
+	.ltiming_adjust = 1,
+	.apdma_sync = 0,
+	.max_dma_support = 33,
+};
+
+static const struct mtk_i2c_compatible mt6771_v2sync_compat = {
+	.quirks = &mt8183_i2c_quirks,
+	.regs = mt_i2c_regs_v2,
+	.pmic_i2c = 0,
+	.dcm = 1,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 1,
+	.ltiming_adjust = 1,
+	.apdma_sync = 1,
+	.max_dma_support = 33,
+};
+
+static const struct mtk_i2c_compatible mt6771_v2dcm_compat = {
+	.quirks = &mt8183_i2c_quirks,
+	.regs = mt_i2c_regs_v2,
+	.pmic_i2c = 0,
+	.dcm = 1,
+	.auto_restart = 1,
+	.aux_len_reg = 1,
+	.timing_adjust = 1,
+	.dma_sync = 1,
+	.ltiming_adjust = 1,
+	.apdma_sync = 0,
+	.max_dma_support = 33,
+};
 static const struct mtk_i2c_compatible mt6577_compat = {
 	.quirks = &mt6577_i2c_quirks,
 	.regs = mt_i2c_regs_v1,
@@ -526,6 +660,7 @@ static const struct mtk_i2c_compatible mt8192_compat = {
 static const struct of_device_id mtk_i2c_of_match[] = {
 	{ .compatible = "mediatek,mt2712-i2c", .data = &mt2712_compat },
 	{ .compatible = "mediatek,mt6577-i2c", .data = &mt6577_compat },
+	{ .compatible = "mediatek,mt6771-i2c", .data = &mt6771_compat },
 	{ .compatible = "mediatek,mt6589-i2c", .data = &mt6589_compat },
 	{ .compatible = "mediatek,mt7622-i2c", .data = &mt7622_compat },
 	{ .compatible = "mediatek,mt7981-i2c", .data = &mt7981_compat },
@@ -551,11 +686,27 @@ static void mtk_i2c_writew(struct mtk_i2c *i2c, u16 val,
 	writew(val, i2c->base + i2c->dev_comp->regs[reg]);
 }
 
+static void mtk_i2c_set_speed(struct mtk_i2c *i2c, unsigned int parent_clk);
+
 static void mtk_i2c_init_hw(struct mtk_i2c *i2c)
 {
 	u16 control_reg;
 	u16 intr_stat_reg;
 	u16 ext_conf_val;
+
+	/* Live overrides for the MT6771 bring-up (see the module params above). */
+	if (mtk_i2c_force_od)
+		i2c->use_push_pull = false;
+
+	if (mtk_i2c_speed_khz) {
+		unsigned int hz = mtk_i2c_speed_khz * 1000;
+
+		if (hz != i2c->speed_hz) {
+			i2c->speed_hz = hz;
+			mtk_i2c_set_speed(i2c,
+				clk_get_rate(i2c->clocks[I2C_MT65XX_CLK_MAIN].clk));
+		}
+	}
 
 	mtk_i2c_writew(i2c, I2C_CHN_CLR_FLAG, OFFSET_START);
 	intr_stat_reg = mtk_i2c_readw(i2c, OFFSET_INTR_STAT);
@@ -944,51 +1095,54 @@ static void mtk_i2c_set_speed(struct mtk_i2c *i2c, unsigned int parent_clk)
 
 static void i2c_dump_register(struct mtk_i2c *i2c)
 {
-	dev_dbg(i2c->dev, "SLAVE_ADDR: 0x%x, INTR_MASK: 0x%x\n",
+	dev_info(i2c->dev, "cfg: variant=%d speed=%u pp=%d irq_stat=0x%x\n",
+		mtk_i2c_test_variant, i2c->speed_hz, i2c->use_push_pull,
+		i2c->irq_stat);
+	dev_info(i2c->dev, "SLAVE_ADDR: 0x%x, INTR_MASK: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_SLAVE_ADDR),
 		mtk_i2c_readw(i2c, OFFSET_INTR_MASK));
-	dev_dbg(i2c->dev, "INTR_STAT: 0x%x, CONTROL: 0x%x\n",
+	dev_info(i2c->dev, "INTR_STAT: 0x%x, CONTROL: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_INTR_STAT),
 		mtk_i2c_readw(i2c, OFFSET_CONTROL));
-	dev_dbg(i2c->dev, "TRANSFER_LEN: 0x%x, TRANSAC_LEN: 0x%x\n",
+	dev_info(i2c->dev, "TRANSFER_LEN: 0x%x, TRANSAC_LEN: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_TRANSFER_LEN),
 		mtk_i2c_readw(i2c, OFFSET_TRANSAC_LEN));
-	dev_dbg(i2c->dev, "DELAY_LEN: 0x%x, HTIMING: 0x%x\n",
+	dev_info(i2c->dev, "DELAY_LEN: 0x%x, HTIMING: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_DELAY_LEN),
 		mtk_i2c_readw(i2c, OFFSET_TIMING));
-	dev_dbg(i2c->dev, "START: 0x%x, EXT_CONF: 0x%x\n",
+	dev_info(i2c->dev, "START: 0x%x, EXT_CONF: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_START),
 		mtk_i2c_readw(i2c, OFFSET_EXT_CONF));
-	dev_dbg(i2c->dev, "HS: 0x%x, IO_CONFIG: 0x%x\n",
+	dev_info(i2c->dev, "HS: 0x%x, IO_CONFIG: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_HS),
 		mtk_i2c_readw(i2c, OFFSET_IO_CONFIG));
-	dev_dbg(i2c->dev, "DCM_EN: 0x%x, TRANSFER_LEN_AUX: 0x%x\n",
+	dev_info(i2c->dev, "DCM_EN: 0x%x, TRANSFER_LEN_AUX: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_DCM_EN),
 		mtk_i2c_readw(i2c, OFFSET_TRANSFER_LEN_AUX));
-	dev_dbg(i2c->dev, "CLOCK_DIV: 0x%x, FIFO_STAT: 0x%x\n",
+	dev_info(i2c->dev, "CLOCK_DIV: 0x%x, FIFO_STAT: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_CLOCK_DIV),
 		mtk_i2c_readw(i2c, OFFSET_FIFO_STAT));
-	dev_dbg(i2c->dev, "DEBUGCTRL : 0x%x, DEBUGSTAT: 0x%x\n",
+	dev_info(i2c->dev, "DEBUGCTRL : 0x%x, DEBUGSTAT: 0x%x\n",
 		mtk_i2c_readw(i2c, OFFSET_DEBUGCTRL),
 		mtk_i2c_readw(i2c, OFFSET_DEBUGSTAT));
 	if (i2c->dev_comp->regs == mt_i2c_regs_v2) {
-		dev_dbg(i2c->dev, "LTIMING: 0x%x, MULTI_DMA: 0x%x\n",
+		dev_info(i2c->dev, "LTIMING: 0x%x, MULTI_DMA: 0x%x\n",
 			mtk_i2c_readw(i2c, OFFSET_LTIMING),
 			mtk_i2c_readw(i2c, OFFSET_MULTI_DMA));
 	}
-	dev_dbg(i2c->dev, "\nDMA_INT_FLAG: 0x%x, DMA_INT_EN: 0x%x\n",
+	dev_info(i2c->dev, "\nDMA_INT_FLAG: 0x%x, DMA_INT_EN: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_INT_FLAG),
 		readl(i2c->pdmabase + OFFSET_INT_EN));
-	dev_dbg(i2c->dev, "DMA_EN: 0x%x, DMA_CON: 0x%x\n",
+	dev_info(i2c->dev, "DMA_EN: 0x%x, DMA_CON: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_EN),
 		readl(i2c->pdmabase + OFFSET_CON));
-	dev_dbg(i2c->dev, "DMA_TX_MEM_ADDR: 0x%x, DMA_RX_MEM_ADDR: 0x%x\n",
+	dev_info(i2c->dev, "DMA_TX_MEM_ADDR: 0x%x, DMA_RX_MEM_ADDR: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_TX_MEM_ADDR),
 		readl(i2c->pdmabase + OFFSET_RX_MEM_ADDR));
-	dev_dbg(i2c->dev, "DMA_TX_LEN: 0x%x, DMA_RX_LEN: 0x%x\n",
+	dev_info(i2c->dev, "DMA_TX_LEN: 0x%x, DMA_RX_LEN: 0x%x\n",
 		readl(i2c->pdmabase + OFFSET_TX_LEN),
 		readl(i2c->pdmabase + OFFSET_RX_LEN));
-	dev_dbg(i2c->dev, "DMA_TX_4G_MODE: 0x%x, DMA_RX_4G_MODE: 0x%x",
+	dev_info(i2c->dev, "DMA_TX_4G_MODE: 0x%x, DMA_RX_4G_MODE: 0x%x",
 		readl(i2c->pdmabase + OFFSET_TX_4G_MODE),
 		readl(i2c->pdmabase + OFFSET_RX_4G_MODE));
 }
@@ -1222,7 +1376,7 @@ static int mtk_i2c_do_transfer(struct mtk_i2c *i2c, struct i2c_msg *msgs,
 	}
 
 	if (ret == 0) {
-		dev_dbg(i2c->dev, "addr: %x, transfer timeout\n", msgs->addr);
+		dev_info(i2c->dev, "addr: %x, transfer timeout\n", msgs->addr);
 		i2c_dump_register(i2c);
 		mtk_i2c_init_hw(i2c);
 		return -ETIMEDOUT;
@@ -1243,7 +1397,34 @@ static int mtk_i2c_transfer(struct i2c_adapter *adap,
 	int ret;
 	int left_num = num;
 	bool write_then_read_en = false;
+	bool did_recovery = false;
 	struct mtk_i2c *i2c = i2c_get_adapdata(adap);
+
+	/*
+	 * The bootloader can leave a slave holding SDA low (for example after
+	 * an aborted transfer).  With SDA stuck the controller never completes
+	 * a START and every access times out.  Run the generic GPIO recovery
+	 * before the first transfer so the first client probe works.  A slave
+	 * may need more than the nine clocks of a single pass, so retry a few
+	 * times before giving up.
+	 */
+	if (!i2c->bus_recovery_done) {
+		i2c->bus_recovery_done = true;
+		if (adap->bus_recovery_info) {
+			int i;
+
+			for (i = 0; i < 3; i++) {
+				ret = i2c_recover_bus(adap);
+				did_recovery = true;
+				dev_info(i2c->dev,
+					 "initial bus recovery %d: %d\n",
+					 i + 1, ret);
+				if (!ret)
+					break;
+				msleep(20);
+			}
+		}
+	}
 
 	if (i2c->adap.bus_regulator) {
 		ret = regulator_enable(i2c->adap.bus_regulator);
@@ -1254,6 +1435,10 @@ static int mtk_i2c_transfer(struct i2c_adapter *adap,
 	ret = clk_bulk_enable(I2C_MT65XX_CLK_MAX, i2c->clocks);
 	if (ret)
 		goto err_regulator;
+
+	/* Recovery switches the pads through GPIO mode; reset the controller. */
+	if (did_recovery)
+		mtk_i2c_init_hw(i2c);
 
 	i2c->auto_restart = i2c->dev_comp->auto_restart;
 
@@ -1366,6 +1551,20 @@ static int mtk_i2c_parse_dt(struct device_node *np, struct mtk_i2c *i2c)
 	if (ret < 0)
 		i2c->speed_hz = I2C_MAX_STANDARD_MODE_FREQ;
 
+	/*
+	 * MT6771 bring-up: the INFRA gate clocks are registered against the
+	 * fixed 26 MHz clk26m, so the real I2C parent rate is not modelled.
+	 * A high-speed request (LK sets i2c5 to 3.4 MHz) then cannot be
+	 * divided down and mtk_i2c_calculate_speed() fails, leaving broken
+	 * timing registers.  Fall back to fast mode until the topckgen I2C
+	 * mux is properly described.
+	 */
+	if (i2c->speed_hz > I2C_MAX_FAST_MODE_FREQ) {
+		dev_info(i2c->dev, "clamping %u Hz to %u Hz (clk26m bring-up)\n",
+			 i2c->speed_hz, I2C_MAX_FAST_MODE_FREQ);
+		i2c->speed_hz = I2C_MAX_FAST_MODE_FREQ;
+	}
+
 	ret = of_property_read_u32(np, "clock-div", &i2c->clk_src_div);
 	if (ret < 0)
 		return ret;
@@ -1407,6 +1606,22 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	init_completion(&i2c->msg_complete);
 
 	i2c->dev_comp = of_device_get_match_data(&pdev->dev);
+	switch (mtk_i2c_test_variant) {
+	case 0:
+		i2c->dev_comp = &mt6771_v1_compat;
+		break;
+	case 1:
+		i2c->dev_comp = &mt6771_v2_compat;
+		break;
+	case 2:
+		i2c->dev_comp = &mt6771_v2sync_compat;
+		break;
+	case 3:
+		i2c->dev_comp = &mt6771_v2dcm_compat;
+		break;
+	default:
+		break;
+	}
 	i2c->adap.dev.of_node = pdev->dev.of_node;
 	i2c->dev = &pdev->dev;
 	i2c->adap.dev.parent = &pdev->dev;
@@ -1414,6 +1629,9 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 	i2c->adap.algo = &mtk_i2c_algorithm;
 	i2c->adap.quirks = i2c->dev_comp->quirks;
 	i2c->adap.timeout = 2 * HZ;
+	if (mtk_i2c_timeout_ms)
+		i2c->adap.timeout =
+			max_t(unsigned long, 1, msecs_to_jiffies(mtk_i2c_timeout_ms));
 	i2c->adap.retries = 1;
 	i2c->adap.bus_regulator = devm_regulator_get_optional(&pdev->dev, "vbus");
 	if (IS_ERR(i2c->adap.bus_regulator)) {
@@ -1495,6 +1713,26 @@ static int mtk_i2c_probe(struct platform_device *pdev)
 		dev_err(&pdev->dev,
 			"Request I2C IRQ %d fail\n", irq);
 		goto err_bulk_unprepare;
+	}
+
+	/*
+	 * Provide generic SCL/SDA GPIO recovery.  i2c_register_adapter() will
+	 * pick up scl-gpios/sda-gpios and the "gpio"/"default" pinctrl states
+	 * from the adapter DT node.  Only enable it for buses that actually
+	 * describe recovery GPIOs, otherwise the i2c core logs an error for
+	 * every adapter.
+	 */
+	if (of_property_present(pdev->dev.of_node, "scl-gpios")) {
+		i2c->adap.bus_recovery_info =
+			devm_kzalloc(&pdev->dev,
+				     sizeof(*i2c->adap.bus_recovery_info),
+				     GFP_KERNEL);
+		if (!i2c->adap.bus_recovery_info) {
+			ret = -ENOMEM;
+			goto err_bulk_unprepare;
+		}
+		i2c->adap.bus_recovery_info->recover_bus =
+			i2c_generic_scl_recovery;
 	}
 
 	i2c_set_adapdata(&i2c->adap, i2c);

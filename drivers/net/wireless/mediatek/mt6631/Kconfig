@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config MT6631_WLAN
+	tristate "MediaTek MT6631 (CONSYS_6771) WLAN support"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on CFG80211
+	select WIRELESS_EXT
+	select WEXT_PRIV
+	select CRC32
+	help
+	  Say Y or M here to build the vendor WLAN driver for the MediaTek
+	  MT6631 connectivity combo chip.  On MT6771 (Helio P60/P70) the WiFi
+	  MAC lives inside the CONNSYS subsystem and is driven over the AHB
+	  HIF, not SDIO.
+
+	  The driver is the MediaTek "gen3" WLAN stack (STA + P2P) with the
+	  CONNSYS/WMT glue adapted to mainline.  It needs the WLAN firmware
+	  blob (WIFI_RAM_CODE_6759) in /lib/firmware.
+
+	  If unsure, say N.

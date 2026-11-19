@@ -352,6 +352,7 @@ static void die_kernel_fault(const char *msg, unsigned long addr,
 
 	show_pte(addr);
 	die("Oops", regs, esr);
+	printk_debug_flush_to_dram();
 	bust_spinlocks(0);
 	make_task_dead(SIGKILL);
 }
@@ -441,8 +442,17 @@ static void __do_kernel_fault(unsigned long addr, unsigned long esr,
 		if (esr_fsc_is_translation_fault(esr)) {
 			if (kfence_handle_page_fault(addr, esr & ESR_ELx_WNR, regs))
 				return;
+			/*
+			 * TEMP DEBUG (MT6771 bring-up): bpf_prog_find_from_stack()
+			 * unwinds the stack on every translation fault. During early
+			 * boot it loops/faults recursively on the VMAP stack, so the
+			 * real fault never reaches die_kernel_fault(). Skip the BPF
+			 * arena recovery until the boot path is stable.
+			 */
+#if 0
 			if (bpf_arena_handle_page_fault(addr, esr & ESR_ELx_WNR, regs->pc))
 				return;
+#endif
 		}
 
 		msg = "paging request";

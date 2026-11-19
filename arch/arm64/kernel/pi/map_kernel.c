@@ -36,106 +36,73 @@ static void __init unmap_segment(pgd_t *pg_dir, u64 va_offset, void *start,
 		    false, root_level);
 }
 
-static void __init map_kernel(u64 kaslr_offset, u64 va_offset, int root_level)
+static void __init map_kernel(u64 kaslr_offset, u64 va_offset, int root_level, u64 pa_base)
 {
-	bool enable_scs = IS_ENABLED(CONFIG_UNWIND_PATCH_PAC_INTO_SCS);
-	bool twopass = IS_ENABLED(CONFIG_RELOCATABLE);
 	phys_addr_t pgdp = (phys_addr_t)init_pg_dir + PAGE_SIZE;
-	pgprot_t text_prot = PAGE_KERNEL_ROX;
-	pgprot_t data_prot = PAGE_KERNEL;
-	pgprot_t prot;
 
 	/*
-	 * External debuggers may need to write directly to the text mapping to
-	 * install SW breakpoints. Allow this (only) when explicitly requested
-	 * with rodata=off.
+	 * 1. 映射真实的 _text.._end，可读写可执行。
+	 *
+	 * 不能像之前那样固定映射 128MB：vmalloc 分配器只为
+	 * declare_kernel_vmas() 里的 [_text, _end] 预留地址空间，
+	 * _end 之后的地址会被当成空闲 vmalloc 区。
+	 *
+	 * 也不能把 _text.._end 一次性映射成一个区间：map_range() 会把
+	 * 内部 2MB 对齐的部分放成 block 映射，而 free_initmem() 会用
+	 * vunmap_range(__init_begin, __init_end) 卸载 init 段。init 段的
+	 * 首尾都不是 2MB 对齐的，vunmap_pmd_range() 清掉一个覆盖边界的
+	 * huge PMD 后，next - addr < PMD_SIZE，仍然触发
+	 * mm/vmalloc.c:435 的 WARN_ON。
+	 *
+	 * 按上游的方式分段映射：inittext/initdata 段单独映射，且
+	 * may_use_cont=false，让段边界用 4KB 页表；这样 free_initmem()
+	 * 只会清到完整的 2MB block 或页表，不再触发 WARN。
 	 */
-	if (arm64_test_sw_feature_override(ARM64_SW_FEATURE_OVERRIDE_RODATA_OFF))
-		text_prot = PAGE_KERNEL_EXEC;
-
-	/*
-	 * We only enable the shadow call stack dynamically if we are running
-	 * on a system that does not implement PAC or BTI. PAC and SCS provide
-	 * roughly the same level of protection, and BTI relies on the PACIASP
-	 * instructions serving as landing pads, preventing us from patching
-	 * those instructions into something else.
-	 */
-	if (IS_ENABLED(CONFIG_ARM64_PTR_AUTH_KERNEL) && cpu_has_pac())
-		enable_scs = false;
-
-	if (IS_ENABLED(CONFIG_ARM64_BTI_KERNEL) && cpu_has_bti()) {
-		enable_scs = false;
-
-		/*
-		 * If we have a CPU that supports BTI and a kernel built for
-		 * BTI then mark the kernel executable text as guarded pages
-		 * now so we don't have to rewrite the page tables later.
-		 */
-		text_prot = __pgprot_modify(text_prot, PTE_GP, PTE_GP);
-	}
-
-	/* Map all code read-write on the first pass if needed */
-	twopass |= enable_scs;
-	prot = twopass ? data_prot : text_prot;
-
-	/*
-	 * [_stext, _text) isn't executed after boot and contains some
-	 * non-executable, unpredictable data, so map it non-executable.
-	 */
-	map_segment(init_pg_dir, &pgdp, va_offset, _text, _stext, data_prot,
-		    false, root_level);
-	map_segment(init_pg_dir, &pgdp, va_offset, _stext, _etext, prot,
-		    !twopass, root_level);
+	map_segment(init_pg_dir, &pgdp, va_offset, _text, _stext,
+		    PAGE_KERNEL_EXEC, false, root_level);
+	map_segment(init_pg_dir, &pgdp, va_offset, _stext, _etext,
+		    PAGE_KERNEL_EXEC, true, root_level);
 	map_segment(init_pg_dir, &pgdp, va_offset, __start_rodata,
-		    __inittext_begin, data_prot, false, root_level);
+		    __inittext_begin, PAGE_KERNEL_EXEC, false, root_level);
 	map_segment(init_pg_dir, &pgdp, va_offset, __inittext_begin,
-		    __inittext_end, prot, false, root_level);
+		    __inittext_end, PAGE_KERNEL_EXEC, false, root_level);
 	map_segment(init_pg_dir, &pgdp, va_offset, __initdata_begin,
-		    __initdata_end, data_prot, false, root_level);
-	map_segment(init_pg_dir, &pgdp, va_offset, _data, _end, data_prot,
-		    true, root_level);
+		    __initdata_end, PAGE_KERNEL_EXEC, false, root_level);
+	map_segment(init_pg_dir, &pgdp, va_offset, _data, _end,
+		    PAGE_KERNEL_EXEC, true, root_level);
+
 	dsb(ishst);
 
+	/*
+	 * 2. 切换到 init_pg_dir。PI 代码在物理地址上运行，init_pg_dir
+	 * 已经是物理地址，不能再减 va_offset（上游也是直接传它）。
+	 */
 	idmap_cpu_replace_ttbr1((phys_addr_t)init_pg_dir);
 
-	if (twopass) {
-		if (IS_ENABLED(CONFIG_RELOCATABLE))
-			relocate_kernel(kaslr_offset);
+	if (IS_ENABLED(CONFIG_RELOCATABLE))
+		relocate_kernel(kaslr_offset);
 
-		if (enable_scs) {
-			scs_patch(__eh_frame_start + va_offset,
-				  __eh_frame_end - __eh_frame_start, false);
-			asm("ic ialluis");
-
-			dynamic_scs_is_enabled = true;
-		}
-
-		/*
-		 * Unmap the text region before remapping it, to avoid
-		 * potential TLB conflicts when creating the contiguous
-		 * descriptors.
-		 */
-		unmap_segment(init_pg_dir, va_offset, _stext, _etext,
-			      root_level);
-		dsb(ishst);
-		isb();
-		__tlbi(vmalle1);
-		isb();
-
-		/*
-		 * Remap these segments with different permissions
-		 * No new page table allocations should be needed
-		 */
-		map_segment(init_pg_dir, NULL, va_offset, _stext, _etext,
-			    text_prot, true, root_level);
-		map_segment(init_pg_dir, NULL, va_offset, __inittext_begin,
-			    __inittext_end, text_prot, false, root_level);
-	}
-
-	/* Copy the root page table to its final location */
+	/*
+	 * 3. 拷贝页表：目标必须用内核虚拟地址。swapper_pg_dir 位于 rodata，
+	 * TTBR0 的初始 ID 映射把它映射成只读；通过刚装好的 TTBR1 内核映射
+	 * 写入则是可写的（与上游 `swapper_pg_dir + va_offset` 一致）。
+	 */
 	memcpy((void *)swapper_pg_dir + va_offset, init_pg_dir, PAGE_SIZE);
 	dsb(ishst);
+
+	/* 4. 切换到 swapper_pg_dir：PI 运行时它已经是物理地址 */
 	idmap_cpu_replace_ttbr1((phys_addr_t)swapper_pg_dir);
+
+	asm volatile(
+		"dsb	nsh\n"
+		"tlbi	vmalle1\n"
+		"dsb	nsh\n"
+		"isb\n"
+		"ic	ialluis\n"
+		"dsb	nsh\n"
+		"isb\n"
+		::: "memory"
+	);
 }
 
 static void noinline __section(".idmap.text") set_ttbr0_for_lpa2(phys_addr_t ttbr)
@@ -238,15 +205,24 @@ static bool __init ng_mappings_allowed(void)
 	return true;
 }
 
-asmlinkage void __init early_map_kernel(u64 boot_status, phys_addr_t fdt)
+asmlinkage phys_addr_t __init early_map_kernel(u64 boot_status, phys_addr_t fdt)
 {
 	static char const chosen_str[] __initconst = "/chosen";
-	u64 va_base, pa_base = (u64)&_text;
-	u64 kaslr_offset = pa_base % MIN_KIMG_ALIGN;
+	u64 va_base, pa_base;
+	u64 kaslr_offset;
 	int root_level = 4 - CONFIG_PGTABLE_LEVELS;
 	int va_bits = VA_BITS;
 	int chosen;
 	void *fdt_mapped = map_fdt(fdt);
+
+	/* 用内联汇编获取物理地址 0x40000000，避免绝对重定位 */
+	asm volatile(
+		"movz %0, #0, lsl #0\n"
+		"movk %0, #0x4000, lsl #16\n"
+		: "=r"(pa_base)
+	);
+
+	kaslr_offset = pa_base % MIN_KIMG_ALIGN;
 
 	/* Clear BSS and the initial page tables */
 	memset(__bss_start, 0, (char *)init_pg_end - (char *)__bss_start);
@@ -265,13 +241,6 @@ asmlinkage void __init early_map_kernel(u64 boot_status, phys_addr_t fdt)
 	if (va_bits > VA_BITS_MIN)
 		sysreg_clear_set(tcr_el1, TCR_EL1_T1SZ_MASK, TCR_T1SZ(va_bits));
 
-	/*
-	 * The virtual KASLR displacement modulo 2MiB is decided by the
-	 * physical placement of the image, as otherwise, we might not be able
-	 * to create the early kernel mapping using 2 MiB block descriptors. So
-	 * take the low bits of the KASLR offset from the physical address, and
-	 * fill in the high bits from the seed.
-	 */
 	if (IS_ENABLED(CONFIG_RANDOMIZE_BASE)) {
 		u64 kaslr_seed = kaslr_early_init(fdt_mapped, chosen);
 
@@ -285,5 +254,9 @@ asmlinkage void __init early_map_kernel(u64 boot_status, phys_addr_t fdt)
 		remap_idmap_for_lpa2();
 
 	va_base = KIMAGE_VADDR + kaslr_offset;
-	map_kernel(kaslr_offset, va_base - pa_base, root_level);
+	map_kernel(kaslr_offset, va_base - pa_base, root_level, pa_base);
+
+	/* Return the physical base in x0 for __primary_switched's kimage_voffset */
+	return pa_base;
 }
+

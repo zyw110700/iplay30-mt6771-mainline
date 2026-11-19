@@ -17,31 +17,31 @@
  */
 #define SYM_FUNC_START(name)				\
 	SYM_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)	\
-	bti c ;
+	// bti c ;
 
 #define SYM_FUNC_START_NOALIGN(name)			\
 	SYM_START(name, SYM_L_GLOBAL, SYM_A_NONE)	\
-	bti c ;
+	// bti c ;
 
 #define SYM_FUNC_START_LOCAL(name)			\
 	SYM_START(name, SYM_L_LOCAL, SYM_A_ALIGN)	\
-	bti c ;
+	// bti c ;
 
 #define SYM_FUNC_START_LOCAL_NOALIGN(name)		\
 	SYM_START(name, SYM_L_LOCAL, SYM_A_NONE)	\
-	bti c ;
+	// bti c ;
 
 #define SYM_FUNC_START_WEAK(name)			\
 	SYM_START(name, SYM_L_WEAK, SYM_A_ALIGN)	\
-	bti c ;
+	// bti c ;
 
 #define SYM_FUNC_START_WEAK_NOALIGN(name)		\
 	SYM_START(name, SYM_L_WEAK, SYM_A_NONE)		\
-	bti c ;
+	// bti c ;
 
 #define SYM_TYPED_FUNC_START(name)				\
 	SYM_TYPED_START(name, SYM_L_GLOBAL, SYM_A_ALIGN)	\
-	bti c ;
+	// bti c ;
 
 #define _THIS_IP_ ({ unsigned long __ip; asm volatile("adr %0, ." : "=r" (__ip)); __ip; })
 

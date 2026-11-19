@@ -247,6 +247,16 @@ config COMMON_CLK_MT6765_MIPI2BSYS
        help
          This driver supports MediaTek MT6765 mipi2bsys clocks.
 
+config COMMON_CLK_MT6771
+	tristate "Clock driver for MediaTek MT6771"
+	depends on (ARCH_MEDIATEK && ARM64) || COMPILE_TEST
+	select COMMON_CLK_MEDIATEK
+	default ARCH_MEDIATEK && ARM64
+	help
+	  This driver supports the MediaTek MT6771 INFRA_AO gate clocks
+	  used during bring-up (UART and MSDC). The vendor DT describes
+	  the controller as "mediatek,infracfg_ao".
+
 config COMMON_CLK_MT6779
 	tristate "Clock driver for MediaTek MT6779"
 	depends on (ARCH_MEDIATEK && ARM64) || COMPILE_TEST

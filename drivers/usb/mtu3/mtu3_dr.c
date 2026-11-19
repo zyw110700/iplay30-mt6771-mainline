@@ -65,12 +65,32 @@ static int ssusb_port0_switch(struct ssusb_mtk *ssusb,
 	return 0;
 }
 
+/*
+ * On MT6771 the USB2 PHY takes its IDDIG input from a pin that is not wired
+ * up on these tablets, so the role has to be forced through the PHY itself
+ * instead of relying on the ID pin.  Without this the PHY keeps the device
+ * termination and the xHCI port never sees a downstream D+ pullup: PORTSC
+ * stays at CCS=0 even though VBUS and the Type-C CC handshake are fine.
+ *
+ * PHY_MODE_USB_OTG is deliberately used for the device role: it just drops
+ * the force and keeps the PHY register state that gadget mode has always
+ * used on this board.
+ */
+static void ssusb_phy_set_mode(struct ssusb_mtk *ssusb, enum phy_mode mode)
+{
+	int i;
+
+	for (i = 0; i < ssusb->num_phys; i++)
+		phy_set_mode(ssusb->phys[i], mode);
+}
+
 static void switch_port_to_host(struct ssusb_mtk *ssusb)
 {
 	u32 check_clk = 0;
 
 	dev_dbg(ssusb->dev, "%s\n", __func__);
 
+	ssusb_phy_set_mode(ssusb, PHY_MODE_USB_HOST);
 	ssusb_port0_switch(ssusb, USB2_PORT, true);
 
 	if (ssusb->otg_switch.is_u3_drd) {
@@ -90,6 +110,7 @@ static void switch_port_to_device(struct ssusb_mtk *ssusb)
 
 	dev_dbg(ssusb->dev, "%s\n", __func__);
 
+	ssusb_phy_set_mode(ssusb, PHY_MODE_USB_OTG);
 	ssusb_port0_switch(ssusb, USB2_PORT, false);
 
 	if (ssusb->otg_switch.is_u3_drd) {

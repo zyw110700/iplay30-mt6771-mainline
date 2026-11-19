@@ -2439,6 +2439,18 @@ int mmc_attach_mmc(struct mmc_host *host)
 	 * Detect and init the card.
 	 */
 	err = mmc_init_card(host, rocr, NULL);
+	if (err && (host->caps2 & MMC_CAP2_HS400)) {
+		/*
+		 * Bring-up safety net: a controller/card combination may advertise
+		 * HS400 but fail to initialise it.  Retry once at HS200 instead of
+		 * making the whole card (and rootfs) unavailable.
+		 */
+		pr_warn("%s: init failed (%d), retrying without HS400\n",
+			mmc_hostname(host), err);
+		host->caps2 &= ~(MMC_CAP2_HS400 | MMC_CAP2_HS400_ES);
+		mmc_power_cycle(host, rocr);
+		err = mmc_init_card(host, rocr, NULL);
+	}
 	if (err)
 		goto err;
 

@@ -36,6 +36,14 @@
 #define WDT_MIN_TIMEOUT		2
 #define WDT_LENGTH_TIMEOUT(n)	((n) << 5)
 
+/*
+ * The "mediatek,toprgu" node found on some vendor-supplied FDTs is already
+ * programmed and started by the bootloader.  Its LENGTH encoding is not
+ * necessarily identical to the known SoC variants, so do not reprogram it:
+ * keep the bootloader window and let the watchdog core ping it frequently.
+ */
+#define WDT_TOPRGU_HEARTBEAT_TIMEOUT	4
+
 #define WDT_LENGTH		0x04
 #define WDT_LENGTH_KEY		0x8
 
@@ -77,15 +85,22 @@ struct mtk_wdt_dev {
 	bool disable_wdt_extrst;
 	bool reset_by_toprgu;
 	bool has_swsysrst_en;
+	bool keep_boot_timeout;
 };
 
 struct mtk_wdt_data {
 	int toprgu_sw_rst_num;
 	bool has_swsysrst_en;
+	bool keep_boot_timeout;
 };
 
 static const struct mtk_wdt_data mt2712_data = {
 	.toprgu_sw_rst_num = MT2712_TOPRGU_SW_RST_NUM,
+};
+
+/* Vendor FDT watchdog node: bootloader already programmed the timeouts. */
+static const struct mtk_wdt_data toprgu_data = {
+	.keep_boot_timeout = true,
 };
 
 static const struct mtk_wdt_data mt6735_data = {
@@ -294,7 +309,12 @@ static void mtk_wdt_init(struct watchdog_device *wdt_dev)
 
 	if (readl(wdt_base + WDT_MODE) & WDT_MODE_EN) {
 		set_bit(WDOG_HW_RUNNING, &wdt_dev->status);
-		mtk_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
+		/*
+		 * For the vendor "mediatek,toprgu" node the bootloader window
+		 * is kept as-is; only the watchdog core heartbeat is added.
+		 */
+		if (!mtk_wdt->keep_boot_timeout)
+			mtk_wdt_set_timeout(wdt_dev, wdt_dev->timeout);
 	}
 }
 
@@ -408,17 +428,41 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, mtk_wdt);
 
+	wdt_data = of_device_get_match_data(dev);
+	mtk_wdt->keep_boot_timeout = wdt_data && wdt_data->keep_boot_timeout;
+
 	mtk_wdt->wdt_base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(mtk_wdt->wdt_base))
 		return PTR_ERR(mtk_wdt->wdt_base);
 
-	irq = platform_get_irq_optional(pdev, 0);
+	/*
+	 * The vendor "mediatek,toprgu" node describes its IRQ with
+	 * IRQ_TYPE_NONE, which makes the GICv3 core emit a WARN_ON() and,
+	 * with panic_on_warn=1, abort the boot.  We only need the heartbeat,
+	 * so never translate that interrupt for this variant.
+	 */
+	if (mtk_wdt->keep_boot_timeout)
+		irq = 0;
+	else
+		irq = platform_get_irq_optional(pdev, 0);
 	if (irq > 0) {
 		err = devm_request_irq(&pdev->dev, irq, mtk_wdt_isr, 0, "wdt_bark",
 				       &mtk_wdt->wdt_dev);
-		if (err)
-			return err;
+		if (err) {
+			/*
+			 * For a bootloader-started watchdog, the heartbeat is
+			 * what matters; a missing pretimeout IRQ must not make
+			 * the whole driver fail to probe.
+			 */
+			if (!mtk_wdt->keep_boot_timeout)
+				return err;
+			dev_warn(dev, "cannot request IRQ %d (%d), no pretimeout\n",
+				 irq, err);
+			irq = 0;
+		}
+	}
 
+	if (irq > 0) {
 		mtk_wdt->wdt_dev.info = &mtk_wdt_pt_info;
 		mtk_wdt->wdt_dev.pretimeout = WDT_MAX_TIMEOUT / 2;
 	} else {
@@ -433,6 +477,15 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 	mtk_wdt->wdt_dev.max_hw_heartbeat_ms = WDT_MAX_TIMEOUT * 1000;
 	mtk_wdt->wdt_dev.min_timeout = WDT_MIN_TIMEOUT;
 	mtk_wdt->wdt_dev.parent = dev;
+
+	if (mtk_wdt->keep_boot_timeout) {
+		/*
+		 * The hardware window is unknown, so make the framework ping
+		 * the bootloader-programmed watchdog every 2 seconds.
+		 */
+		mtk_wdt->wdt_dev.timeout = WDT_TOPRGU_HEARTBEAT_TIMEOUT;
+		mtk_wdt->wdt_dev.pretimeout = 0;
+	}
 
 	watchdog_init_timeout(&mtk_wdt->wdt_dev, timeout, dev);
 	watchdog_set_nowayout(&mtk_wdt->wdt_dev, nowayout);
@@ -451,7 +504,7 @@ static int mtk_wdt_probe(struct platform_device *pdev)
 		 mtk_wdt->wdt_dev.timeout, nowayout);
 
 	wdt_data = of_device_get_match_data(dev);
-	if (wdt_data) {
+	if (wdt_data && wdt_data->toprgu_sw_rst_num) {
 		err = toprgu_register_reset_controller(pdev,
 						       wdt_data->toprgu_sw_rst_num);
 		if (err)
@@ -503,6 +556,12 @@ static const struct of_device_id mtk_wdt_dt_ids[] = {
 	{ .compatible = "mediatek,mt8188-wdt", .data = &mt8188_data },
 	{ .compatible = "mediatek,mt8192-wdt", .data = &mt8192_data },
 	{ .compatible = "mediatek,mt8195-wdt", .data = &mt8195_data },
+	/*
+	 * Vendor FDTs (e.g. MT6771) expose the same block as "mediatek,toprgu".
+	 * The bootloader has already enabled it; keep its window and only add
+	 * the kernel heartbeat.
+	 */
+	{ .compatible = "mediatek,toprgu", .data = &toprgu_data },
 	{ /* sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, mtk_wdt_dt_ids);

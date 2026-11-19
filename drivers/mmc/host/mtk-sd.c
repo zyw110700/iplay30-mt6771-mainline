@@ -14,6 +14,7 @@
 #include <linux/ioport.h>
 #include <linux/irq.h>
 #include <linux/of.h>
+#include <linux/of_address.h>
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_device.h>
 #include <linux/pm.h>
@@ -312,6 +313,9 @@
 #define EMMC50_CFG2_AXI_SET_LEN   GENMASK(27, 24) /* RW */
 
 #define EMMC50_CFG3_OUTS_WR       GENMASK(4, 0)   /* RW */
+#define EMMC50_CFG_READ_DAT_CNT   GENMASK(23, 21) /* RW */
+#define EMMC50_CFG_END_BIT_CHK_CNT GENMASK(8, 5)  /* RW */
+#define EMMC50_CFG1_CKSWITCH_CNT   GENMASK(10, 8) /* RW */
 
 #define SDC_FIFO_CFG_WRVALIDSEL   BIT(24)  /* RW */
 #define SDC_FIFO_CFG_RDVALIDSEL   BIT(25)  /* RW */
@@ -450,6 +454,14 @@ struct mtk_mmc_compatible {
 	bool support_new_tx;
 	bool support_new_rx;
 	bool support_spm_res_release;
+	/*
+	 * Vendor bring-up DT (e.g. MT6771 "mediatek,msdc") describes clocks
+	 * as "msdcX-clock"/"msdcX-hclock", uses a non-standard "pinctl"
+	 * phandle and may reference a PMIC regulator that no mainline driver
+	 * provides yet.  Tolerate all of that so the host can at least be
+	 * probed at low speed.
+	 */
+	bool vendor_bringup;
 };
 
 struct msdc_tune_para {
@@ -479,6 +491,7 @@ struct msdc_host {
 
 	void __iomem *base;		/* host base address */
 	void __iomem *top_base;		/* host top register base address */
+	void __iomem *ds_top;		/* MT6771 eMMC TOP (DS tune) registers */
 
 	struct msdc_dma dma;	/* dma channel */
 	u64 dma_mask;
@@ -565,6 +578,21 @@ static const struct mtk_mmc_compatible mt6779_compat = {
 	.stop_dly_sel = 3,
 	.enhance_rx = true,
 	.support_64g = true,
+};
+
+static const struct mtk_mmc_compatible mt6771_vendor_compat = {
+	.clk_div_bits = 12,
+	.recheck_sdio_irq = false,
+	.hs400_tune = false,
+	.pad_tune_reg = MSDC_PAD_TUNE0,
+	.async_fifo = true,
+	.data_tune = true,
+	.busy_check = true,
+	.stop_clk_fix = true,
+	.stop_dly_sel = 3,
+	.enhance_rx = true,
+	.support_64g = true,
+	.vendor_bringup = true,
 };
 
 static const struct mtk_mmc_compatible mt6795_compat = {
@@ -716,6 +744,7 @@ static const struct of_device_id msdc_of_ids[] = {
 	{ .compatible = "mediatek,mt2701-mmc", .data = &mt2701_compat},
 	{ .compatible = "mediatek,mt2712-mmc", .data = &mt2712_compat},
 	{ .compatible = "mediatek,mt6779-mmc", .data = &mt6779_compat},
+	{ .compatible = "mediatek,msdc", .data = &mt6771_vendor_compat},
 	{ .compatible = "mediatek,mt6795-mmc", .data = &mt6795_compat},
 	{ .compatible = "mediatek,mt7620-mmc", .data = &mt7620_compat},
 	{ .compatible = "mediatek,mt7622-mmc", .data = &mt7622_compat},
@@ -1617,7 +1646,13 @@ static void msdc_data_xfer_done(struct msdc_host *host, u32 events,
 		if ((events & MSDC_INT_XFER_COMPL) && (!stop || !stop->error)) {
 			data->bytes_xfered = data->blocks * data->blksz;
 		} else {
-			dev_dbg(host->dev, "interrupt events: %x\n", events);
+			/* Bring-up: this path is the source of the 0-byte
+			 * multi-block reads, so print it unconditionally. */
+			dev_err(host->dev,
+				"DATERR: cmd=%d blocks=%d blksz=%d sg=%d events=%08x host_err=%x dma_cfg=%08x\n",
+				mrq->cmd->opcode, data->blocks, data->blksz,
+				data->sg_count, events, host->error,
+				readl(host->base + MSDC_DMA_CFG));
 			msdc_reset_hw(host);
 			host->error |= REQ_DAT_ERR;
 			data->bytes_xfered = 0;
@@ -1665,6 +1700,12 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 	struct msdc_host *host = mmc_priv(mmc);
 	int ret;
 
+	/* The eMMC I/O rail is fixed by the bootloader at 1.8 V; a 1.2 V
+	 * request must not be reported as successful or HS200 will stay on
+	 * the wrong voltage. */
+	if (ios->signal_voltage == MMC_SIGNAL_VOLTAGE_120)
+		return -EINVAL;
+
 	if (!IS_ERR(mmc->supply.vqmmc)) {
 		if (ios->signal_voltage != MMC_SIGNAL_VOLTAGE_330 &&
 		    ios->signal_voltage != MMC_SIGNAL_VOLTAGE_180) {
@@ -1682,7 +1723,7 @@ static int msdc_ops_switch_volt(struct mmc_host *mmc, struct mmc_ios *ios)
 		/* Apply different pinctrl settings for different signal voltage */
 		if (ios->signal_voltage == MMC_SIGNAL_VOLTAGE_180)
 			pinctrl_select_state(host->pinctrl, host->pins_uhs);
-		else
+		else if (host->pinctrl)
 			pinctrl_select_state(host->pinctrl, host->pins_default);
 	}
 	return 0;
@@ -1962,7 +2003,7 @@ static void msdc_init_hw(struct msdc_host *host)
 
 	/* Support 'single' burst type only when AXI_LEN is 0 */
 	sdr_get_field(host->base + EMMC50_CFG2, EMMC50_CFG2_AXI_SET_LEN, &val);
-	if (!val)
+	if (!val || host->dev_comp->vendor_bringup)
 		pb1_val |= MSDC_PB1_SINGLE_BURST;
 
 	/* Set auto sync state clear, block gap stop clk */
@@ -2610,10 +2651,59 @@ tune_done:
 static int msdc_prepare_hs400_tuning(struct mmc_host *mmc, struct mmc_ios *ios)
 {
 	struct msdc_host *host = mmc_priv(mmc);
+	u32 val;
 
 	host->hs400_mode = true;
 
-	if (host->top_base) {
+	if (host->dev_comp->vendor_bringup) {
+		/*
+		 * Match the MT6771 vendor driver: program PAD_DS_TUNE with
+		 * hs400-ds-delay unconditionally (0 when the DT omits it) and
+		 * do not run the mainline DLY1 sweep.
+		 */
+		/*
+		 * The MT6771 vendor driver (mediatek/ComboA) always programs
+		 * DS zero-tap delay 3 (DLY3) with 20 for HS400 and only
+		 * sweeps DLY1 at runtime.  Keeping DLY3 at 0 makes every
+		 * DLY1 phase return corrupted data on this board, so it is
+		 * not optional.  On MT6771 the DS tune register lives in the
+		 * eMMC TOP block; base + 0x188 is not writable here.
+		 */
+		if (host->ds_top) {
+			val = FIELD_PREP(PAD_DS_DLY3, 20) | PAD_DS_DLY_SEL;
+			writel(val, host->ds_top + EMMC50_PAD_DS_TUNE);
+			/* HS400 command sample selection (vendor) */
+			sdr_set_bits(host->ds_top + EMMC_TOP_CMD,
+				     PAD_CMD_RD_RXDLY_SEL);
+			sdr_clr_bits(host->ds_top + EMMC_TOP_CMD,
+				     PAD_CMD_RD_RXDLY2_SEL);
+		} else {
+			val = FIELD_PREP(PAD_DS_TUNE_DLY3, 20) |
+			      PAD_DS_TUNE_DLY_SEL;
+			writel(val, host->base + PAD_DS_TUNE);
+		}
+
+		/* Vendor HS400: enhanced RX path, no CRC/CMD latch TA. */
+		sdr_clr_bits(host->base + MSDC_PATCH_BIT2,
+			     MSDC_PB2_CRCSTSENSEL | MSDC_PB2_RESPSTSENSEL);
+
+		/* Vendor HS400 byte/end-bit counters. */
+		sdr_set_field(host->base + EMMC50_CFG0,
+			      EMMC50_CFG_READ_DAT_CNT, 1);
+		sdr_set_field(host->base + EMMC50_CFG0,
+			      EMMC50_CFG_END_BIT_CHK_CNT, 3);
+		sdr_set_field(host->base + EMMC50_CFG1,
+			      EMMC50_CFG1_CKSWITCH_CNT, 4);
+
+		dev_info(host->dev,
+			 "HS400: cfg=%08x ds=%08x topds=%08x pb=%08x pb2=%08x\n",
+			 readl(host->base + MSDC_CFG),
+			 readl(host->base + PAD_DS_TUNE),
+			 host->ds_top ?
+				readl(host->ds_top + EMMC50_PAD_DS_TUNE) : 0,
+			 readl(host->base + MSDC_PATCH_BIT),
+			 readl(host->base + MSDC_PATCH_BIT2));
+	} else if (host->top_base) {
 		if (host->hs400_ds_dly3)
 			sdr_set_field(host->top_base + EMMC50_PAD_DS_TUNE,
 				      PAD_DS_DLY3, host->hs400_ds_dly3);
@@ -2642,6 +2732,67 @@ static int msdc_execute_hs400_tuning(struct mmc_host *mmc, struct mmc_card *card
 	u32 val, result_dly1 = 0;
 	u8 *ext_csd;
 	int i, ret;
+
+	/*
+	 * MT6771 vendor bring-up.
+	 *
+	 * The vendor driver (mediatek/ComboA) hard-codes the DS zero-tap
+	 * delay 3 to 20 for HS400 and sweeps only DLY1.  With DLY3 = 0 no
+	 * DLY1 phase is usable on this board, which is why the generic
+	 * sweep appeared to fail everywhere.  Try the vendor DLY3 first and
+	 * fall back to a few neighbours, stopping at the first window.
+	 */
+	if (host->dev_comp->vendor_bringup) {
+		static const u8 dly3_list[] = { 20, 16, 24, 28, 12, 8, 4, 0 };
+		int k;
+
+		void __iomem *ds_reg = host->ds_top ?
+			host->ds_top + EMMC50_PAD_DS_TUNE :
+			host->base + PAD_DS_TUNE;
+		u32 dly1_mask = host->ds_top ? PAD_DS_DLY1 : PAD_DS_TUNE_DLY1;
+		u32 dly3_mask = host->ds_top ? PAD_DS_DLY3 : PAD_DS_TUNE_DLY3;
+		u32 dly_sel = host->ds_top ? PAD_DS_DLY_SEL :
+					     PAD_DS_TUNE_DLY_SEL;
+		u32 dly2_sel = host->ds_top ? PAD_DS_DLY2_SEL :
+					      PAD_DS_TUNE_DLY2_SEL;
+
+		sdr_set_bits(ds_reg, dly_sel);
+		sdr_clr_bits(ds_reg, dly2_sel);
+
+		for (k = 0; k < ARRAY_SIZE(dly3_list); k++) {
+			result_dly1 = 0;
+			sdr_set_field(ds_reg, dly3_mask, dly3_list[k]);
+
+			host->hs400_tuning = true;
+			for (i = 0; i < PAD_DELAY_HALF; i++) {
+				sdr_set_field(ds_reg, dly1_mask, i);
+				ret = mmc_get_ext_csd(card, &ext_csd);
+				if (!ret) {
+					result_dly1 |= BIT(i);
+					kfree(ext_csd);
+				}
+			}
+			host->hs400_tuning = false;
+
+			dly1_delay = get_best_delay(host, result_dly1);
+			dev_info(host->dev,
+				 "HS400: DLY3=%u map=%08x maxlen=%u final=%u\n",
+				 dly3_list[k], result_dly1,
+				 dly1_delay.maxlen, dly1_delay.final_phase);
+			if (dly1_delay.maxlen)
+				break;
+		}
+
+		if (!dly1_delay.maxlen) {
+			dev_err(host->dev, "HS400: no DS delay window found\n");
+			return -EIO;
+		}
+
+		sdr_set_field(ds_reg, dly1_mask, dly1_delay.final_phase);
+		dev_info(host->dev, "HS400: final DS tune=0x%08x\n",
+			 readl(ds_reg));
+		return 0;
+	}
 
 	if (host->top_base) {
 		sdr_set_bits(host->top_base + EMMC50_PAD_DS_TUNE,
@@ -2929,13 +3080,37 @@ static void msdc_of_property_parse(struct platform_device *pdev,
 static int msdc_of_clock_parse(struct platform_device *pdev,
 			       struct msdc_host *host)
 {
+	char src_name[24] = "source";
+	char hclk_name[24] = "hclk";
+	u32 index;
+	u8 index8;
 	int ret;
 
-	host->src_clk = devm_clk_get(&pdev->dev, "source");
+	if (host->dev_comp->vendor_bringup) {
+		/*
+		 * Vendor DT:
+		 *   clocks = <&infracfg_ao MSDC0_SCK>, <&infracfg_ao MSDC0>;
+		 *   clock-names = "msdc0-clock", "msdc0-hclock";
+		 *
+		 * "index" is a single byte in the vendor DT (e.g. [00] for
+		 * eMMC), so do not require a full 32-bit cell.
+		 */
+		if (!of_property_read_u8(pdev->dev.of_node, "index", &index8)) {
+			index = index8;
+		} else if (of_property_read_u32(pdev->dev.of_node, "index",
+						&index)) {
+			dev_err(&pdev->dev, "vendor msdc node has no index\n");
+			return -EINVAL;
+		}
+		snprintf(src_name, sizeof(src_name), "msdc%u-clock", index);
+		snprintf(hclk_name, sizeof(hclk_name), "msdc%u-hclock", index);
+	}
+
+	host->src_clk = devm_clk_get(&pdev->dev, src_name);
 	if (IS_ERR(host->src_clk))
 		return PTR_ERR(host->src_clk);
 
-	host->h_clk = devm_clk_get(&pdev->dev, "hclk");
+	host->h_clk = devm_clk_get(&pdev->dev, hclk_name);
 	if (IS_ERR(host->h_clk))
 		return PTR_ERR(host->h_clk);
 
@@ -2956,9 +3131,14 @@ static int msdc_of_clock_parse(struct platform_device *pdev,
 	 * its parent (specified as a different clock only on new DTs).
 	 */
 	if (!host->src_clk_cg) {
-		host->src_clk_cg = clk_get_parent(host->src_clk);
-		if (IS_ERR(host->src_clk_cg))
-			return PTR_ERR(host->src_clk_cg);
+		if (host->dev_comp->vendor_bringup) {
+			/* The vendor gate is itself the card-clock gate. */
+			host->src_clk_cg = host->src_clk;
+		} else {
+			host->src_clk_cg = clk_get_parent(host->src_clk);
+			if (IS_ERR(host->src_clk_cg))
+				return PTR_ERR(host->src_clk_cg);
+		}
 	}
 
 	/* If present, always enable for this clock gate */
@@ -2990,6 +3170,8 @@ static int msdc_drv_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
+	dev_info(&pdev->dev, "MSDCDBG: probe enter\n");
+
 	/* Allocate MMC host for this device */
 	mmc = devm_mmc_alloc_host(&pdev->dev, sizeof(struct msdc_host));
 	if (!mmc)
@@ -2997,8 +3179,11 @@ static int msdc_drv_probe(struct platform_device *pdev)
 
 	host = mmc_priv(mmc);
 	ret = mmc_of_parse(mmc);
-	if (ret)
+	if (ret) {
+		dev_info(&pdev->dev, "MSDCDBG: mmc_of_parse failed %d\n", ret);
 		return ret;
+	}
+	dev_info(&pdev->dev, "MSDCDBG: mmc_of_parse ok\n");
 
 	host->base = devm_platform_ioremap_resource(pdev, 0);
 	if (IS_ERR(host->base))
@@ -3013,12 +3198,43 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	}
 
 	ret = mmc_regulator_get_supply(mmc);
-	if (ret)
+	if (ret && !host->dev_comp->vendor_bringup)
 		return ret;
+	if (ret) {
+		dev_info(&pdev->dev,
+			 "ignoring vmmc/vqmmc regulators, keeping bootloader state\n");
+		/* Treat every supply as "absent" so the core skips voltage ops. */
+		mmc->supply.vmmc = ERR_PTR(-ENODEV);
+		mmc->supply.vqmmc = ERR_PTR(-ENODEV);
+		mmc->supply.vqmmc2 = ERR_PTR(-ENODEV);
+		/*
+		 * The bootloader already enabled the fixed 3.3V rail.  Without
+		 * a vmmc regulator the core leaves ocr_avail at 0, which makes
+		 * mmc_select_voltage() reject every card with "no support for
+		 * card's volts".  Advertise the standard 3.3V range instead.
+		 */
+		mmc->ocr_avail = MMC_VDD_32_33 | MMC_VDD_33_34;
+	}
+
+	if (host->dev_comp->vendor_bringup) {
+		/*
+		 * The vendor bootloader already runs the eMMC I/O at 1.8 V
+		 * (it uses HS400), and both pads and pinmux are left in that
+		 * state, so keeping HS200 enabled is safe.  The minimal clock
+		 * model may still hold the bus at the wrong rate; the DT
+		 * "mediatek,src-clock-hz" property fixes that.
+		 */
+		mmc->caps &= ~(MMC_CAP_1_8V_DDR | MMC_CAP_1_2V_DDR);
+	}
+
+	dev_info(&pdev->dev, "MSDCDBG: regulators done\n");
 
 	ret = msdc_of_clock_parse(pdev, host);
-	if (ret)
+	if (ret) {
+		dev_info(&pdev->dev, "MSDCDBG: clock parse failed %d\n", ret);
 		return ret;
+	}
+	dev_info(&pdev->dev, "MSDCDBG: clocks ok\n");
 
 	host->reset = devm_reset_control_get_optional_exclusive(&pdev->dev,
 								"hrst");
@@ -3039,20 +3255,27 @@ static int msdc_drv_probe(struct platform_device *pdev)
 		return host->irq;
 
 	host->pinctrl = devm_pinctrl_get(&pdev->dev);
-	if (IS_ERR(host->pinctrl))
-		return dev_err_probe(&pdev->dev, PTR_ERR(host->pinctrl),
-				     "Cannot find pinctrl");
-
-	host->pins_default = pinctrl_lookup_state(host->pinctrl, "default");
-	if (IS_ERR(host->pins_default)) {
-		dev_err(&pdev->dev, "Cannot find pinctrl default!\n");
-		return PTR_ERR(host->pins_default);
+	if (IS_ERR(host->pinctrl)) {
+		if (!host->dev_comp->vendor_bringup)
+			return dev_err_probe(&pdev->dev, PTR_ERR(host->pinctrl),
+					     "Cannot find pinctrl");
+		/* Vendor DT only has a private "pinctl" phandle: pins are
+		 * already configured by the bootloader. */
+		host->pinctrl = NULL;
 	}
 
-	host->pins_uhs = pinctrl_lookup_state(host->pinctrl, "state_uhs");
-	if (IS_ERR(host->pins_uhs)) {
-		dev_err(&pdev->dev, "Cannot find pinctrl uhs!\n");
-		return PTR_ERR(host->pins_uhs);
+	if (host->pinctrl) {
+		host->pins_default = pinctrl_lookup_state(host->pinctrl, "default");
+		if (IS_ERR(host->pins_default)) {
+			dev_err(&pdev->dev, "Cannot find pinctrl default!\n");
+			return PTR_ERR(host->pins_default);
+		}
+
+		host->pins_uhs = pinctrl_lookup_state(host->pinctrl, "state_uhs");
+		if (IS_ERR(host->pins_uhs)) {
+			dev_err(&pdev->dev, "Cannot find pinctrl uhs!\n");
+			return PTR_ERR(host->pins_uhs);
+		}
 	}
 
 	/* Support for SDIO eint irq ? */
@@ -3073,6 +3296,28 @@ static int msdc_drv_probe(struct platform_device *pdev)
 
 	host->dev = &pdev->dev;
 	host->src_clk_freq = clk_get_rate(host->src_clk);
+	/*
+	 * Bring-up workaround: the minimal MT6771 infra clock driver models
+	 * every gate as a child of clk26m, so the rate read back here is the
+	 * 26 MHz reference instead of the real topckgen output (the vendor
+	 * bootloader selects msdcpll_ck, ~400 MHz, in CK_CFG_4).  Dividing
+	 * by the wrong rate overclocks the eMMC bus by ~15x, which makes
+	 * every multi-block transfer fail with DATCRCERR.  Let the DT state
+	 * the real source rate until the clock tree is modelled properly.
+	 */
+	{
+		u32 src_hz;
+
+		if (!of_property_read_u32(pdev->dev.of_node,
+					  "mediatek,src-clock-hz", &src_hz)) {
+			host->src_clk_freq = src_hz;
+			dev_info(&pdev->dev, "using DT source clock %u Hz\n",
+				 src_hz);
+		} else {
+			dev_info(&pdev->dev, "source clock %u Hz (clk model)\n",
+				 host->src_clk_freq);
+		}
+	}
 	/* Set host parameters to mmc */
 	mmc->ops = &mt_msdc_ops;
 	if (host->dev_comp->clk_div_bits == 8)
@@ -3127,12 +3372,16 @@ static int msdc_drv_probe(struct platform_device *pdev)
 	spin_lock_init(&host->lock);
 
 	platform_set_drvdata(pdev, mmc);
+	dev_info(&pdev->dev, "MSDCDBG: ungating clocks (src rate %lu)\n",
+		 clk_get_rate(host->src_clk));
 	ret = msdc_ungate_clock(host);
 	if (ret) {
 		dev_err(&pdev->dev, "Cannot ungate clocks!\n");
 		goto release_clk;
 	}
+	dev_info(&pdev->dev, "MSDCDBG: clocks ungated\n");
 	msdc_init_hw(host);
+	dev_info(&pdev->dev, "MSDCDBG: hw init done, adding host\n");
 
 	if (mmc->caps2 & MMC_CAP2_CQE) {
 		host->cq_host = devm_kzalloc(mmc->parent,
@@ -3173,6 +3422,29 @@ static int msdc_drv_probe(struct platform_device *pdev)
 			       IRQF_TRIGGER_NONE, pdev->name, host);
 	if (ret)
 		goto release;
+
+	if (host->dev_comp->vendor_bringup) {
+		/*
+		 * MT6771 keeps the eMMC data-strobe delay in a separate TOP
+		 * register block (0x11f50000).  The vendor driver maps it from
+		 * the "mediatek,msdc0_top" node the same way; the base offset
+		 * 0x188 is not writable on this SoC.
+		 */
+		struct device_node *top_np;
+
+		top_np = of_find_compatible_node(NULL, NULL,
+						 "mediatek,msdc0_top");
+		if (top_np) {
+			host->ds_top = of_iomap(top_np, 0);
+			of_node_put(top_np);
+			if (!host->ds_top)
+				dev_warn(host->dev,
+					 "failed to map msdc0_top\n");
+			else
+				dev_info(host->dev,
+					 "msdc0_top mapped for DS tuning\n");
+		}
+	}
 
 	pm_runtime_set_active(host->dev);
 	pm_runtime_set_autosuspend_delay(host->dev, MTK_MMC_AUTOSUSPEND_DELAY);

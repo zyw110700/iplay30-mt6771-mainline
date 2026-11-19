@@ -18,6 +18,15 @@ config MTK_SOC_THERMAL
 	  This driver configures thermal controllers to collect
 	  temperature via AUXADC interface.
 
+config MTK_MT6771_THERMAL
+	tristate "MT6771 AUXADC thermal controller (bring-up)"
+	depends on HAS_IOMEM
+	help
+	  Read the two MT6771 thermal controller banks (little cluster, big
+	  cluster, GPU, SoC, modem, ABB) without programming them.  The driver
+	  stays inert until enabled through debugfs, so a wrong clock or sensor
+	  mapping cannot hang the boot.
+
 config MTK_LVTS_THERMAL
         tristate "LVTS Thermal Driver for MediaTek SoCs"
         depends on HAS_IOMEM

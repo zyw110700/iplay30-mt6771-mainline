@@ -1,0 +1,21 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# MediaTek BTIF (Bluetooth/connectivity serial interface) driver
+#
+# Original vendor driver: drivers/misc/mediatek/btif in the MT6771 Android
+# kernel.  Ported to mainline so the WMT/STP stack can talk to the
+# connectivity MCU (this is the transport the vendor WMT layer uses for the
+# ROM patch download, the MCU clock/oscillator configuration and the RF
+# calibration trigger -- everything that has to happen before the WiFi
+# firmware can run).
+
+config MTK_BTIF
+	tristate "MediaTek BTIF driver"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	depends on OF
+	help
+	  Say Y or M here to build the vendor BTIF driver, the serial
+	  interface between the AP and the connectivity MCU used by the
+	  WMT/STP layer.
+
+	  If unsure, say N.

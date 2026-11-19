@@ -1,0 +1,108 @@
+// SPDX-License-Identifier: GPL-2.0+
+/dts-v1/;
+
+#include <dt-bindings/interrupt-controller/arm-gic.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+
+/ {
+	model = "Teclast iPlay 30 (MT6771)";
+	compatible = "teclast,iplay30", "mediatek,mt6771";
+	#address-cells = <2>;
+	#size-cells = <2>;
+
+	chosen {
+		// 强制单核(nosmp) + 关闭 GICv3 LPI 特性
+		bootargs = "console=tty0 loglevel=8 ignore_loglevel mem=2G vmalloc=400M nokaslr bootopt=64S3,32N2,64N2 nosmp irqchip.gicv3_nolpi=1";
+	};
+
+	memory {
+		device_type = "memory";
+		reg = <0x0 0x40000000 0x0 0x80000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		boot_tags: tags@54000000 {
+			reg = <0x0 0x54000000 0x0 0x400000>;
+			no-map;
+		};
+
+		boot_ramdisk: ramdisk@55000000 {
+			reg = <0x0 0x55000000 0x0 0x1000000>;
+			no-map;
+		};
+
+		ramoops@54400000 {
+			compatible = "ramoops";
+			reg = <0x0 0x54400000 0x0 0xe0000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x20000>;
+			pmsg-size = <0x20000>;
+		};
+	};
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		// 终极单核，绝对不包含 enable-method 和 idle-states
+		cpu0: cpu@0 { 
+			device_type = "cpu"; 
+			compatible = "arm,cortex-a53"; 
+			reg = <0x0>; 
+			clock-frequency = <0x8b799100>; 
+		};
+	};
+
+	// 彻底删除 psci 节点！
+
+	sysirq: interrupt-controller@c530a80 {
+		compatible = "mediatek,mt6771-sysirq", "mediatek,mt6577-sysirq";
+		reg = <0x0 0xc530a80 0x0 0x50>;
+		interrupt-controller;
+		#address-cells = <0>;
+		#interrupt-cells = <3>;
+		interrupt-parent = <&gic>;
+	};
+
+	gic: interrupt-controller@c000000 {
+		compatible = "arm,gic-v3";
+		reg = <0x0 0xc000000 0x0 0x40000>,
+		      <0x0 0xc100000 0x0 0x200000>;
+		interrupts = <GIC_PPI 9 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-controller;
+		#address-cells = <0>;
+		#interrupt-cells = <3>;
+		#redistributor-regions = <1>;
+		interrupt-parent = <&gic>;
+	};
+
+	timer {
+		compatible = "arm,armv8-timer";
+		interrupt-parent = <&gic>;
+		// 原厂实测为低电平触发 (IRQ_TYPE_LEVEL_LOW)
+		interrupts = <GIC_PPI 13 IRQ_TYPE_LEVEL_LOW>, <GIC_PPI 14 IRQ_TYPE_LEVEL_LOW>, <GIC_PPI 11 IRQ_TYPE_LEVEL_LOW>, <GIC_PPI 10 IRQ_TYPE_LEVEL_LOW>;
+		clock-frequency = <13000000>;
+	};
+
+	clk26m: clock-26m {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <26000000>;
+		clock-output-names = "clk26m";
+	};
+
+	uart0: serial@11002000 {
+		compatible = "mediatek,mt6577-uart";
+		reg = <0x0 0x11002000 0x0 0x1000>;
+		interrupt-parent = <&sysirq>;
+		interrupts = <GIC_SPI 91 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&clk26m>, <&clk26m>;
+		clock-names = "baud", "bus";
+		status = "okay"; 
+	};
+};

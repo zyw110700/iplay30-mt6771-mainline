@@ -1776,6 +1776,21 @@ config FB_SIMPLE
 	  Configuration re: surface address, size, and format must be provided
 	  through device tree, or plain old platform data.
 
+config FB_MTK_LKFB
+	tristate "MediaTek MT6771 LK framebuffer takeover"
+	depends on FB && ARM64
+	select FB_CFB_FILLRECT
+	select FB_CFB_COPYAREA
+	select FB_CFB_IMAGEBLIT
+	help
+	  Take over the 1200x1920 framebuffer that the MT6771 LK bootloader
+	  leaves enabled and register it as a legacy fbdev device.  Together
+	  with the framebuffer console this shows kernel printk output on the
+	  panel without a DRM/DSI driver.
+
+	  The display engine keeps scanning out the buffer, so no hardware
+	  programming is needed.  Say Y for MT6771 bring-up.
+
 config FB_SSD1307
 	tristate "Solomon SSD1307 framebuffer support"
 	depends on FB && I2C

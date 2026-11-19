@@ -7,6 +7,8 @@
 #include <linux/slab.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-mapping.h>
+#include <linux/pagemap.h>
+#include <linux/of.h>
 
 #include <drm/panfrost_drm.h>
 #include <drm/drm_print.h>
@@ -487,6 +489,22 @@ panfrost_gem_create(struct drm_device *dev, size_t size, u32 flags)
 	shmem = drm_gem_shmem_create(dev, size);
 	if (IS_ERR(shmem))
 		return ERR_CAST(shmem);
+
+	/*
+	 * MT6771: the display controller (OVL/RDMA) can only address 32-bit
+	 * physical addresses.  Its scanout buffers are imported from this
+	 * driver, so keep every GPU buffer below 4 GiB (ZONE_DMA32) instead
+	 * of letting shmem pages land in the upper part of RAM.
+	 */
+	if (dev->dev->of_node &&
+	    of_device_is_compatible(dev->dev->of_node, "mediatek,mt6771-mali") &&
+	    shmem->base.filp) {
+		struct address_space *mapping = shmem->base.filp->f_mapping;
+		gfp_t gfp = mapping_gfp_mask(mapping);
+
+		mapping_set_gfp_mask(mapping,
+				     (gfp & ~__GFP_HIGHMEM) | __GFP_DMA32);
+	}
 
 	bo = to_panfrost_bo(&shmem->base);
 	bo->noexec = !!(flags & PANFROST_BO_NOEXEC);

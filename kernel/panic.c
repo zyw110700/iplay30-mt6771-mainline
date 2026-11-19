@@ -638,6 +638,9 @@ void vpanic(const char *fmt, va_list args)
 		buf[len - 1] = '\0';
 
 	pr_emerg("Kernel panic - not syncing: %s\n", buf);
+#ifdef CONFIG_ARM64
+	printk_debug_flush_to_dram();
+#endif
 	/*
 	 * Avoid nested stack-dumping if a panic occurs during oops processing
 	 */

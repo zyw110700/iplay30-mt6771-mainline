@@ -133,6 +133,7 @@ static const struct resource mt6370_regulator_irqs[] = {
 static const struct mfd_cell mt6370_devices[] = {
 	MFD_CELL_OF("mt6370-adc",
 		    NULL, NULL, 0, 0, "mediatek,mt6370-adc"),
+	MFD_CELL_BASIC("mt6370-battery", NULL, NULL, 0, 0),
 	MFD_CELL_OF("mt6370-charger",
 		    NULL, NULL, 0, 0, "mediatek,mt6370-charger"),
 	MFD_CELL_OF("mt6370-flashlight",
@@ -141,6 +142,8 @@ static const struct mfd_cell mt6370_devices[] = {
 		    NULL, NULL, 0, 0, "mediatek,mt6370-indicator"),
 	MFD_CELL_OF("mt6370-tcpc",
 		    NULL, NULL, 0, 0, "mediatek,mt6370-tcpc"),
+	MFD_CELL_OF("mt6370-otg-vbus",
+		    NULL, NULL, 0, 0, "mediatek,mt6370-otg-vbus"),
 	MFD_CELL_RES("mt6370-regulator", mt6370_regulator_irqs),
 };
 
@@ -227,11 +230,16 @@ static const struct regmap_config mt6370_regmap_config = {
 	.max_register		= MT6370_REG_MAXADDR,
 };
 
+static bool mt6370_use_irq;
+module_param_named(use_irq, mt6370_use_irq, bool, 0444);
+MODULE_PARM_DESC(use_irq, "Register the MT6370 regmap IRQ chip (default 0)");
+
 static int mt6370_probe(struct i2c_client *i2c)
 {
 	struct mt6370_info *info;
 	struct i2c_client *usbc_i2c;
 	struct regmap *regmap;
+	struct irq_domain *irq_domain = NULL;
 	struct device *dev = &i2c->dev;
 	int ret, vid;
 
@@ -259,11 +267,41 @@ static int mt6370_probe(struct i2c_client *i2c)
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to check vendor info\n");
 
+	if (!mt6370_use_irq) {
+		/*
+		 * iPlay30: nothing in this port consumes MT6370 interrupts
+		 * (vendor charger/TCPC/flashlight drivers do not bind), and
+		 * the INT line stays asserted for a source that the CHG
+		 * mask registers cannot clear.  Requesting the IRQ makes the
+		 * EINT storm for ~30 s until the kernel disables the line.
+		 * Leave it unrequested; the init polls charger state over
+		 * I2C.  Boot with mt6370.use_irq=1 to re-enable.
+		 */
+		dev_info(dev, "IRQ chip not registered (mt6370.use_irq=0)\n");
+		goto no_irq;
+	}
+
 	ret = devm_regmap_add_irq_chip(dev, regmap, i2c->irq,
 				       IRQF_ONESHOT, -1, &mt6370_irq_chip,
 				       &info->irq_data);
-	if (ret)
-		return dev_err_probe(dev, ret, "Failed to add irq chip\n");
+	if (ret) {
+		dev_warn(dev, "Failed to add irq chip (%d), continuing without IRQs\n",
+			 ret);
+	} else {
+		int i;
+
+		/*
+		 * Mask every MT6370 IRQ source by default: no in-tree child
+		 * driver consumes them, and any unmasked status bit keeps
+		 * INT asserted.
+		 */
+		for (i = 0; i < MT6370_NUM_IRQREGS; i++)
+			regmap_write(regmap, MT6370_REG_CHG_MASK1 + i, 0xff);
+
+		irq_domain = regmap_irq_get_domain(info->irq_data);
+	}
+
+no_irq:
 
 	switch (vid) {
 	case MT6370_VENID_MT6372P:
@@ -271,15 +309,13 @@ static int mt6370_probe(struct i2c_client *i2c)
 		ret = devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO,
 					   mt6372_exclusive_devices,
 					   ARRAY_SIZE(mt6372_exclusive_devices),
-					   NULL, 0,
-					   regmap_irq_get_domain(info->irq_data));
+					   NULL, 0, irq_domain);
 		break;
 	default:
 		ret = devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO,
 					   mt6370_exclusive_devices,
 					   ARRAY_SIZE(mt6370_exclusive_devices),
-					   NULL, 0,
-					   regmap_irq_get_domain(info->irq_data));
+					   NULL, 0, irq_domain);
 		break;
 	}
 
@@ -288,8 +324,7 @@ static int mt6370_probe(struct i2c_client *i2c)
 
 	return devm_mfd_add_devices(dev, PLATFORM_DEVID_AUTO,
 				    mt6370_devices, ARRAY_SIZE(mt6370_devices),
-				    NULL, 0,
-				    regmap_irq_get_domain(info->irq_data));
+				    NULL, 0, irq_domain);
 }
 
 static const struct of_device_id mt6370_match_table[] = {

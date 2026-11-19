@@ -23,6 +23,8 @@ struct mtk_cpufreq_platform_data {
 	int sram_min_volt;
 	int sram_max_volt;
 	bool ccifreq_supported;
+	/* Optional conservative limit applied to policy->max at boot (kHz) */
+	unsigned int boot_max_khz;
 };
 
 /*
@@ -164,6 +166,14 @@ static int mtk_cpufreq_set_voltage(struct mtk_cpu_dvfs_info *info, int vproc)
 	const struct mtk_cpufreq_platform_data *soc_data = info->soc_data;
 	int ret;
 
+	/*
+	 * Never ask for more than the platform ceiling: regulator core
+	 * treats min_uV > max_uV as a programming error and BUGs, which
+	 * leaves the cpufreq policy locked up for the rest of the boot.
+	 */
+	if (vproc > soc_data->proc_max_volt)
+		vproc = soc_data->proc_max_volt;
+
 	if (info->need_voltage_tracking)
 		ret = mtk_cpufreq_voltage_tracking(info, vproc);
 	else
@@ -197,6 +207,18 @@ static bool is_ccifreq_ready(struct mtk_cpu_dvfs_info *info)
 	return true;
 }
 
+static unsigned long mtk_cpufreq_pll_rate(struct mtk_cpu_dvfs_info *info)
+{
+	struct clk *armpll = clk_get_parent(info->cpu_clk);
+
+	/*
+	 * The mcucfg mux drops to the 26 MHz clock on its own whenever the
+	 * whole cluster is idle, so read the ARMPLL instead: it always holds
+	 * the frequency the cluster will run at once it wakes up.
+	 */
+	return clk_get_rate(armpll ? armpll : info->cpu_clk);
+}
+
 static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 				  unsigned int index)
 {
@@ -211,7 +233,15 @@ static int mtk_cpufreq_set_target(struct cpufreq_policy *policy,
 
 	inter_vproc = info->intermediate_voltage;
 
-	pre_freq_hz = clk_get_rate(cpu_clk);
+	pre_freq_hz = mtk_cpufreq_pll_rate(info);
+
+	/*
+	 * The PLL is already at the requested rate: nothing to program.  This
+	 * keeps a frozen policy from touching the PLL (and the PMIC) during
+	 * boot.
+	 */
+	if (DIV_ROUND_CLOSEST(pre_freq_hz, 1000) == freq_table[index].frequency)
+		return 0;
 
 	mutex_lock(&info->reg_lock);
 
@@ -578,6 +608,8 @@ static void mtk_cpu_dvfs_info_release(struct mtk_cpu_dvfs_info *info)
 		put_device(info->cci_dev);
 }
 
+static bool mtk_cpufreq_freeze;
+
 static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 {
 	struct mtk_cpu_dvfs_info *info;
@@ -604,6 +636,26 @@ static int mtk_cpufreq_init(struct cpufreq_policy *policy)
 	policy->driver_data = info;
 	policy->clk = info->cpu_clk;
 
+	/*
+	 * Keep the initial transitions inside the range the bootloader has
+	 * already proven; userspace may raise scaling_max_freq later.
+	 */
+	if (info->soc_data->boot_max_khz)
+		policy->max = info->soc_data->boot_max_khz;
+
+	/*
+	 * Bring-up switch: pin the policy to the frequency the bootloader
+	 * left the cluster at, so that nothing is reprogrammed until the
+	 * transition path has been checked by hand.
+	 */
+	if (mtk_cpufreq_freeze) {
+		unsigned int cur = DIV_ROUND_CLOSEST(mtk_cpufreq_pll_rate(info),
+						     1000);
+
+		policy->min = cur;
+		policy->max = cur;
+	}
+
 	return 0;
 }
 
@@ -614,13 +666,28 @@ static void mtk_cpufreq_exit(struct cpufreq_policy *policy)
 	dev_pm_opp_free_cpufreq_table(info->cpu_dev, &policy->freq_table);
 }
 
+static unsigned int mtk_cpufreq_get(unsigned int cpu)
+{
+	struct cpufreq_policy *policy = cpufreq_cpu_get_raw(cpu);
+
+	if (!policy || IS_ERR(policy->clk))
+		return 0;
+
+	/*
+	 * A PLL cannot hit every Hz exactly; round to the nearest kHz so that
+	 * the value reported back matches the frequency table entry that was
+	 * programmed.
+	 */
+	return DIV_ROUND_CLOSEST(mtk_cpufreq_pll_rate(policy->driver_data), 1000);
+}
+
 static struct cpufreq_driver mtk_cpufreq_driver = {
 	.flags = CPUFREQ_NEED_INITIAL_FREQ_CHECK |
 		 CPUFREQ_HAVE_GOVERNOR_PER_POLICY |
 		 CPUFREQ_IS_COOLING_DEV,
 	.verify = cpufreq_generic_frequency_table_verify,
 	.target_index = mtk_cpufreq_set_target,
-	.get = cpufreq_generic_get,
+	.get = mtk_cpufreq_get,
 	.init = mtk_cpufreq_init,
 	.exit = mtk_cpufreq_exit,
 	.register_em = cpufreq_register_em_with_opp,
@@ -743,10 +810,22 @@ static const struct mtk_cpufreq_platform_data mt8516_platform_data = {
 	.ccifreq_supported = false,
 };
 
+static const struct mtk_cpufreq_platform_data mt6771_platform_data = {
+	.min_volt_shift = 100000,
+	.max_volt_shift = 200000,
+	.proc_max_volt = 1100000,
+	.sram_min_volt = 0,
+	.sram_max_volt = 1100000,
+	.ccifreq_supported = false,
+	/* Overclocked OPPs exist but stay opt-in: default stays at 1989 MHz. */
+	.boot_max_khz = 1989000,
+};
+
 /* List of machines supported by this driver */
 static const struct of_device_id mtk_cpufreq_machines[] __initconst __maybe_unused = {
 	{ .compatible = "mediatek,mt2701", .data = &mt2701_platform_data },
 	{ .compatible = "mediatek,mt2712", .data = &mt2701_platform_data },
+	{ .compatible = "mediatek,mt6771", .data = &mt6771_platform_data },
 	{ .compatible = "mediatek,mt7622", .data = &mt7622_platform_data },
 	{ .compatible = "mediatek,mt7623", .data = &mt7623_platform_data },
 	{ .compatible = "mediatek,mt7988a", .data = &mt7988_platform_data },
@@ -772,6 +851,9 @@ static int __init mtk_cpufreq_driver_init(void)
 		pr_debug("Machine is not compatible with mtk-cpufreq\n");
 		return -ENODEV;
 	}
+
+	if (of_property_read_bool(of_root, "mediatek,cpufreq-freeze"))
+		mtk_cpufreq_freeze = true;
 
 	err = platform_driver_register(&mtk_cpufreq_platdrv);
 	if (err)

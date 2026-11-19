@@ -89,4 +89,25 @@ config MTK_SOCINFO
 	  information about the SoC to the userspace including the
 	  manufacturer name, marketing name and soc name.
 
+config MTK_MT6771_CONSYS
+	tristate "MediaTek MT6771 CONNSYS power bring-up"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	help
+	  Say yes here to enable the opt-in MT6771 connectivity subsystem
+	  power-up probe.  It enables the MT6358 VCN18/VCN33 rails, switches
+	  the CONNSYS interface pinmux, powers the CONN MTCMOS domain in the
+	  SPM and polls for the MT6631 A-die chip ID.  The sequence is only
+	  triggered from debugfs, so the driver is harmless until asked to
+	  power the subsystem up.
+
+config MTK_MT6771_MFG
+	tristate "MediaTek MT6771 MFG (Mali GPU) power domain"
+	depends on ARCH_MEDIATEK || COMPILE_TEST
+	help
+	  Say yes here to provide the MTCMOS power domain for the Mali GPU
+	  found on the MediaTek MT6771 (Helio P60/P70).  The domain runs the
+	  vendor power-up sequence from the SPM registers so that panfrost
+	  can probe the GPU.  The MFG PLL and mux are expected to be
+	  programmed by the bootloader.
+
 endmenu

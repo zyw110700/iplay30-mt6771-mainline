@@ -33,6 +33,6 @@ void map_range(phys_addr_t *pte, u64 start, u64 end, phys_addr_t pa,
 	       pgprot_t prot, int level, pte_t *tbl, bool may_use_cont,
 	       u64 va_offset);
 
-asmlinkage void early_map_kernel(u64 boot_status, phys_addr_t fdt);
+asmlinkage phys_addr_t early_map_kernel(u64 boot_status, phys_addr_t fdt);
 
 asmlinkage phys_addr_t create_init_idmap(pgd_t *pgd, ptval_t clrmask);

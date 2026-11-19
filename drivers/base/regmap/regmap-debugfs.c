@@ -16,6 +16,14 @@
 
 #include "internal.h"
 
+/*
+ * iPlay30 bring-up: allow writing single registers through
+ * /sys/kernel/debug/regmap/<dev>/registers ("<hex reg> <hex value>").
+ * Used to poke the MT6370 charger/BLED without rebuilding the initramfs.
+ * This is upstream's own opt-in debug hook; it taints the kernel.
+ */
+#define REGMAP_ALLOW_WRITE_DEBUGFS 1
+
 struct regmap_debugfs_node {
 	struct regmap *map;
 	struct list_head link;
